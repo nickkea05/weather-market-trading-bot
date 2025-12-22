@@ -455,13 +455,24 @@ class PaperTradingBot:
             'win_rate', 'total_wins', 'total_losses'
         ]
         
-        with open(self.results_csv_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            for result in existing_results:
-                # Ensure all fields exist
-                row = {field: result.get(field, '') for field in fieldnames}
-                writer.writerow(row)
+        try:
+            print(f"[DEBUG] Writing {len(existing_results)} results to CSV...")
+            with open(self.results_csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for result in existing_results:
+                    # Ensure all fields exist
+                    row = {field: result.get(field, '') for field in fieldnames}
+                    writer.writerow(row)
+            print(f"[DEBUG] CSV write successful. File exists: {Path(self.results_csv_path).exists()}")
+            # Verify file was written
+            if Path(self.results_csv_path).exists():
+                file_size = Path(self.results_csv_path).stat().st_size
+                print(f"[DEBUG] File size after write: {file_size} bytes")
+        except Exception as e:
+            print(f"[ERROR] Failed to write CSV file: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Print summary
         print(f"\n[RESULTS] Market #{self.market_count} saved to: {self.results_csv_path}")
