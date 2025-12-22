@@ -12,8 +12,8 @@ from typing import Optional, List
 # =============================================================================
 
 MAX_LOSS = 200.0  # Stop loss - prevent excessive drawdown
-TRADE_AMOUNT = .25  # Fixed trade amount for ACCUMULATE and REBALANCE (smaller = more frequent trades)
-MAX_ARB_AMOUNT = .5  # Max amount for ARB trades (aggressive, capture opportunity before ask gone)
+TRADE_AMOUNT = .1  # Fixed trade amount for ACCUMULATE and REBALANCE (smaller = more frequent trades)
+MAX_ARB_AMOUNT = 2  # Max amount for ARB trades (aggressive, capture opportunity before ask gone)
 REBALANCE_THRESHOLD = 0.05  # Very tight - keep within 47.5-52.5% split
 
 # Entry Value Decay (for ACCUMULATE)
@@ -24,10 +24,7 @@ DECAY_A = -0.371064
 DECAY_B = -1.397701
 DECAY_C = 97.939697
 
-# Rebalance Threshold (loose early, very tight late to force 50/50)
-REBALANCE_THRESHOLD_EARLY = 0.15  # Early: 15% imbalance (42.5%/57.5% split)
-REBALANCE_THRESHOLD_LATE = 0.05   # Late: 5% imbalance (47.5%/52.5% split)
-REBALANCE_TIGHTEN_TIME = 12.0     # Start tightening at minute 12
+
 
 # Winning Side Accumulation (late game, bet on likely winner to improve worst case)
 WINNER_ACCUMULATE_START_MINUTES = 10.0  # Start accumulating likely winner after minute 10

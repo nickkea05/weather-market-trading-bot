@@ -398,6 +398,11 @@ class PaperTradingBot:
         overall_roi = (self.total_profit / self.total_cost * 100) if self.total_cost > 0 else 0
         win_rate = (self.wins / self.market_count * 100) if self.market_count > 0 else 0
         
+        # Calculate average positions for this market
+        up_avg = (self.position_state.up_cost / self.position_state.up_shares) if self.position_state.up_shares > 0 else 0
+        down_avg = (self.position_state.down_cost / self.position_state.down_shares) if self.position_state.down_shares > 0 else 0
+        combined_avg = up_avg + down_avg
+        
         # Print summary (stats kept in memory only)
         print(f"\n{'='*80}")
         print(f"MARKET #{self.market_count} COMPLETE")
@@ -405,6 +410,7 @@ class PaperTradingBot:
         print(f"Market Profit: ${actual_profit:.2f}")
         print(f"Market Cost: ${total_cost:.2f}")
         print(f"Winner: {winner}")
+        print(f"Average Positions: UP=${up_avg:.4f}, DOWN=${down_avg:.4f}, Combined=${combined_avg:.4f}")
         print(f"\nOVERALL STATS:")
         print(f"  Markets Traded: {self.market_count}")
         print(f"  Total Profit: ${self.total_profit:.2f}")
