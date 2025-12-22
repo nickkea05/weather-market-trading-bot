@@ -13,7 +13,7 @@ from typing import Optional, List
 
 MAX_LOSS = 200.0  # Stop loss - prevent excessive drawdown
 TRADE_AMOUNT = 1  # Fixed trade amount for ACCUMULATE and REBALANCE (smaller = more frequent trades)
-MAX_ARB_AMOUNT = 10  # Max amount for ARB trades (aggressive, capture opportunity before ask gone)
+MAX_ARB_AMOUNT = 15  # Max amount for ARB trades (aggressive, capture opportunity before ask gone)
 REBALANCE_THRESHOLD = 0.05  # Very tight - keep within 47.5-52.5% split
 
 # Entry Value Decay (for ACCUMULATE)
@@ -43,6 +43,7 @@ class PositionState:
         self.down_cost = 0.0
         self.market_start_time = market_start_time
         self.current_time = market_start_time
+        self.accumulate_streak = 0  # Track consecutive ACCUMULATE trades without ARB
     
     def get_seconds_into_market(self) -> float:
         return self.current_time - self.market_start_time
@@ -137,26 +138,31 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
     
     # === QUESTION 1: Should we ACCUMULATE? ===
     # Buy the cheaper side if entry value is high enough (only every 2 seconds, stops at 5 min)
+    # Circuit breaker: stop accumulating after 30 consecutive ACCUMULATE trades without ARB
     if seconds_into_market < HARD_CUTOFF_SECONDS:
         seconds = int(seconds_into_market)
         entry_value = calculate_entry_value(seconds_into_market)
         if entry_value > ENTRY_THRESHOLD and seconds % 2 == 0:
-            cheaper_side = 'UP' if up_price <= down_price else 'DOWN'
-            cheaper_price = up_price if cheaper_side == 'UP' else down_price
-            
-            shares = TRADE_AMOUNT / cheaper_price
-            new_up_shares = state.up_shares + (shares if cheaper_side == 'UP' else 0)
-            new_down_shares = state.down_shares + (shares if cheaper_side == 'DOWN' else 0)
-            new_up_cost = state.up_cost + (TRADE_AMOUNT if cheaper_side == 'UP' else 0)
-            new_down_cost = state.down_cost + (TRADE_AMOUNT if cheaper_side == 'DOWN' else 0)
-            
-            trades.append({
-                'side': cheaper_side,
-                'size': shares,
-                'price': cheaper_price,
-                'amount': TRADE_AMOUNT,
-                'reason': 'ACCUMULATE'
-            })
+            # Check circuit breaker: skip if 100+ consecutive ACCUMULATEs without ARB
+            if state.accumulate_streak < 100:
+                cheaper_side = 'UP' if up_price <= down_price else 'DOWN'
+                cheaper_price = up_price if cheaper_side == 'UP' else down_price
+                
+                shares = TRADE_AMOUNT / cheaper_price
+                new_up_shares = state.up_shares + (shares if cheaper_side == 'UP' else 0)
+                new_down_shares = state.down_shares + (shares if cheaper_side == 'DOWN' else 0)
+                new_up_cost = state.up_cost + (TRADE_AMOUNT if cheaper_side == 'UP' else 0)
+                new_down_cost = state.down_cost + (TRADE_AMOUNT if cheaper_side == 'DOWN' else 0)
+                
+                trades.append({
+                    'side': cheaper_side,
+                    'size': shares,
+                    'price': cheaper_price,
+                    'amount': TRADE_AMOUNT,
+                    'reason': 'ACCUMULATE'
+                })
+                # Increment counter after adding ACCUMULATE trade
+                state.accumulate_streak += 1
     
     # === QUESTION 2: Should we ARB? ===
     # Only buy the lagging side (fewer shares) to make ARB both profitable AND rebalancing
@@ -172,7 +178,7 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
         
         # Adaptive ARB threshold: stricter early (first 5 min), looser later (last 10 min)
         if seconds_into_market < 300:  # First 5 minutes
-            arb_threshold = 0.93
+            arb_threshold = 0.94
         else:  # Last 10 minutes (after 5 minutes)
             arb_threshold = 0.99
         
@@ -189,6 +195,8 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
                     'amount': amount,
                     'reason': 'ARB'
                 })
+                # Reset counter - market is oscillating normally
+                state.accumulate_streak = 0
         elif lagging_side == 'DOWN' and state.up_shares > 0:
             up_avg = state.up_cost / state.up_shares
             if (up_avg + down_price) < arb_threshold:
@@ -201,6 +209,8 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
                     'amount': amount,
                     'reason': 'ARB'
                 })
+                # Reset counter - market is oscillating normally
+                state.accumulate_streak = 0
     
     # Return all trades (can be 0-2 now: ACCUMULATE, ARB)
     return trades
