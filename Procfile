@@ -1,2 +1,2 @@
-worker: python run_server_paper_trading.py
+worker: python src/paper_trade.py
 
