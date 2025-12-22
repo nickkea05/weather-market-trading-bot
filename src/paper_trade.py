@@ -494,6 +494,21 @@ class PaperTradingBot:
             writer.writerow([0, 0, 0, 0, 0])
         print(f"[BOT] Position CSV initialized: {self.position_csv_path}")
         
+        # Initialize market results CSV (create with header if it doesn't exist)
+        if not Path(self.results_csv_path).exists():
+            fieldnames = [
+                'market_number', 'timestamp', 'market_slug', 'profit', 'total_cost', 'roi',
+                'worst_case', 'best_case', 'winner', 'total_trades', 'arb_trades', 
+                'accumulate_trades', 'rebalance_trades', 'up_shares', 'down_shares',
+                'up_avg', 'down_avg', 'running_avg_profit', 'running_total_profit',
+                'running_total_cost', 'running_avg_roi', 'running_avg_trades',
+                'win_rate', 'total_wins', 'total_losses'
+            ]
+            with open(self.results_csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+            print(f"[BOT] Market results CSV initialized: {self.results_csv_path}")
+        
         self._running = True
         
         # Setup initial connection
