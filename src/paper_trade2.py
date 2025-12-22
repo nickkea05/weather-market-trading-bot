@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from connection import MarketConnection
 from datastream import DataStream, MarketState
+import strategy2
 from strategy2 import (
     PositionState, 
     execute_trade, 
@@ -59,6 +60,7 @@ class PaperTradingBot:
         """Setup connection to current market"""
         print("\n" + "=" * 60)
         print("SETTING UP CONNECTION (PAPER TRADING)")
+        print(f"[STRATEGY] Using strategy module: {strategy2.__name__} ({strategy2.__file__})")
         print("=" * 60)
         
         # Create new connection
