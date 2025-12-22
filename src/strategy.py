@@ -186,7 +186,21 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
         if lagging_side == 'UP' and state.down_shares > 0:
             down_avg = state.down_cost / state.down_shares
             if (down_avg + up_price) < arb_threshold:
-                amount = MAX_ARB_AMOUNT
+                # Find optimal buy amount that minimizes share imbalance
+                best_amount = 1.0
+                best_diff = abs((state.up_shares + (1.0 / up_price)) - state.down_shares)
+                
+                # Test amounts from $1 to MAX_ARB_AMOUNT in $1 increments
+                for test_amount in range(1, int(MAX_ARB_AMOUNT) + 1):
+                    test_shares = test_amount / up_price
+                    new_up_shares = state.up_shares + test_shares
+                    share_diff = abs(new_up_shares - state.down_shares)
+                    
+                    if share_diff < best_diff:
+                        best_diff = share_diff
+                        best_amount = float(test_amount)
+                
+                amount = best_amount
                 shares = amount / up_price
                 trades.append({
                     'side': 'UP',
@@ -200,7 +214,21 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
         elif lagging_side == 'DOWN' and state.up_shares > 0:
             up_avg = state.up_cost / state.up_shares
             if (up_avg + down_price) < arb_threshold:
-                amount = MAX_ARB_AMOUNT
+                # Find optimal buy amount that minimizes share imbalance
+                best_amount = 1.0
+                best_diff = abs((state.down_shares + (1.0 / down_price)) - state.up_shares)
+                
+                # Test amounts from $1 to MAX_ARB_AMOUNT in $1 increments
+                for test_amount in range(1, int(MAX_ARB_AMOUNT) + 1):
+                    test_shares = test_amount / down_price
+                    new_down_shares = state.down_shares + test_shares
+                    share_diff = abs(new_down_shares - state.up_shares)
+                    
+                    if share_diff < best_diff:
+                        best_diff = share_diff
+                        best_amount = float(test_amount)
+                
+                amount = best_amount
                 shares = amount / down_price
                 trades.append({
                     'side': 'DOWN',
