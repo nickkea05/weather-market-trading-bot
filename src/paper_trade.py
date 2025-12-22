@@ -1,6 +1,8 @@
 """
 Paper Trading Bot - Simulates trades without real API calls
 Extends main.py functionality with trade logging and position tracking
+
+Railway deployment test - auto-deploy verification
 """
 
 import os
