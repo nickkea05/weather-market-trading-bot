@@ -10,6 +10,8 @@ import json
 import threading
 import requests
 import psycopg2
+import signal
+import sys
 from psycopg2.extras import execute_values
 from datetime import datetime, timezone, timedelta
 from websocket import WebSocketApp
@@ -21,8 +23,10 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
 WSS_URL = "wss://ws-subscriptions-clob.polymarket.com"
 
-# Gabagool's wallet address (proxy wallet used for trading)
+# Traders to track
 GABAGOOL_WALLET = "0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d"
+TRADER_2_WALLET = "0x63ce342161250d705dc0b16df89036c8e5f9ba9a"
+TRACKED_WALLETS = [GABAGOOL_WALLET, TRADER_2_WALLET]
 
 
 # ============================================================
@@ -78,10 +82,11 @@ def init_tables():
         )
     """)
     
-    # Gabagool trades table
+    # Trader trades table (tracks multiple traders)
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS gabagool_trades (
+        CREATE TABLE IF NOT EXISTS trader_trades (
             id SERIAL PRIMARY KEY,
+            wallet_address VARCHAR(255) NOT NULL,
             market_slug VARCHAR(255) NOT NULL,
             timestamp TIMESTAMP NOT NULL,
             title TEXT,
@@ -97,7 +102,27 @@ def init_tables():
     # Create indexes for faster queries
     cur.execute("CREATE INDEX IF NOT EXISTS idx_market_data_slug ON market_data(market_slug)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_market_data_timestamp ON market_data(timestamp)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_gabagool_slug ON gabagool_trades(market_slug)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trader_trades_slug ON trader_trades(market_slug)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trader_trades_wallet ON trader_trades(wallet_address)")
+    
+    # Migrate old gabagool_trades table if it exists (backward compatibility)
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = 'gabagool_trades'
+        )
+    """)
+    if cur.fetchone()[0]:
+        # Migrate data from old table
+        cur.execute("""
+            INSERT INTO trader_trades (wallet_address, market_slug, timestamp, title, outcome, side, price, size, usdc_size)
+            SELECT %s, market_slug, timestamp, title, outcome, side, price, size, usdc_size
+            FROM gabagool_trades
+            ON CONFLICT DO NOTHING
+        """, (GABAGOOL_WALLET,))
+        conn.commit()
+        print("[DB] Migrated old gabagool_trades data to trader_trades")
     
     conn.commit()
     cur.close()
@@ -109,11 +134,11 @@ def init_tables():
 # Gabagool Trade Fetcher (same as CSV version)
 # ============================================================
 
-def fetch_gabagool_trades(market_slug: str, market_title: str, start_time: datetime, end_time: datetime) -> list:
+def fetch_trader_trades(wallet_address: str, market_slug: str, market_title: str, start_time: datetime, end_time: datetime) -> list:
     """Fetch gabagool's trades for a specific market within a time window"""
     url = f"{DATA_API}/activity"
     
-    print(f"[GABAGOOL] Fetching trades for {GABAGOOL_WALLET[:10]}...")
+    print(f"[TRADER] Fetching trades for {wallet_address[:10]}...")
     
     try:
         all_trades = []
@@ -123,7 +148,7 @@ def fetch_gabagool_trades(market_slug: str, market_title: str, start_time: datet
         
         while offset < max_pages * 500:
             params = {
-                "user": GABAGOOL_WALLET,
+                "user": wallet_address,
                 "type": "TRADE",
                 "limit": 500,
                 "offset": offset
@@ -147,14 +172,14 @@ def fetch_gabagool_trades(market_slug: str, market_title: str, start_time: datet
                 all_trades.append(t)
                 new_count += 1
             
-            print(f"[GABAGOOL] Offset {offset}: {len(trades)} returned, {new_count} new")
+            print(f"[TRADER] Offset {offset}: {len(trades)} returned, {new_count} new")
             
             if new_count == 0:
                 break
             
             offset += 500
         
-        print(f"[GABAGOOL] Total fetched: {len(all_trades)} unique trades")
+        print(f"[TRADER] Total fetched: {len(all_trades)} unique trades")
         
         # Filter for this specific BTC market and time window
         filtered = []
@@ -203,18 +228,18 @@ def fetch_gabagool_trades(market_slug: str, market_title: str, start_time: datet
         
         filtered.sort(key=lambda x: x['timestamp'])
         
-        print(f"[GABAGOOL] Found {len(filtered)} trades for this market")
+        print(f"[TRADER] Found {len(filtered)} trades for this market")
         return filtered
         
     except Exception as e:
-        print(f"[GABAGOOL] Error fetching trades: {e}")
+        print(f"[TRADER] Error fetching trades for {wallet_address[:10]}: {e}")
         return []
 
 
-def save_gabagool_trades_to_db(market_slug: str, trades: list):
-    """Save gabagool's trades to PostgreSQL"""
+def save_trader_trades_to_db(wallet_address: str, market_slug: str, trades: list):
+    """Save trader's trades to PostgreSQL"""
     if not trades:
-        print(f"[GABAGOOL] No trades to save for this market")
+        print(f"[TRADER] No trades to save for {wallet_address[:10]} in this market")
         return
     
     conn = get_db_connection()
@@ -225,6 +250,7 @@ def save_gabagool_trades_to_db(market_slug: str, trades: list):
         values = []
         for t in trades:
             values.append((
+                wallet_address,
                 market_slug,
                 t['timestamp'],
                 t.get('title', ''),
@@ -237,17 +263,17 @@ def save_gabagool_trades_to_db(market_slug: str, trades: list):
         
         execute_values(
             cur,
-            """INSERT INTO gabagool_trades 
-               (market_slug, timestamp, title, outcome, side, price, size, usdc_size)
+            """INSERT INTO trader_trades 
+               (wallet_address, market_slug, timestamp, title, outcome, side, price, size, usdc_size)
                VALUES %s""",
             values
         )
         
         conn.commit()
-        print(f"[GABAGOOL] Saved {len(trades)} trades to database")
+        print(f"[TRADER] Saved {len(trades)} trades for {wallet_address[:10]} to database")
     except Exception as e:
         conn.rollback()
-        print(f"[GABAGOOL] Error saving to database: {e}")
+        print(f"[TRADER] Error saving to database: {e}")
     finally:
         cur.close()
         conn.close()
@@ -279,7 +305,7 @@ class PostgresDataStream:
         self.pending_rows = []
         self.last_insert = time.time()
         self.batch_size = 50  # Insert every 50 rows
-        self.batch_interval = 5  # Or every 5 seconds
+        self.batch_interval = 2  # Or every 2 seconds (reduced to minimize data loss on restart)
         
         print(f"[DB] Writing market data for: {market_slug}")
     
@@ -526,8 +552,9 @@ class PostgresBot:
         self.ws: WebSocketApp = None
         self._running = False
         self._reconnecting = False
-        self._gabagool_trades = []
-        self._gabagool_seen = set()
+        # Track trades for each wallet separately
+        self._trader_trades = {wallet: [] for wallet in TRACKED_WALLETS}
+        self._trader_seen = {wallet: set() for wallet in TRACKED_WALLETS}
     
     def _on_ws_open(self, ws):
         print("[WS] Connected, subscribing...")
@@ -557,7 +584,7 @@ class PostgresBot:
                 time.sleep(1)
         threading.Thread(target=monitor, daemon=True).start()
         
-        def periodic_gabagool_fetch():
+        def periodic_trader_fetch():
             fetch_interval = 180
             last_fetch = time.time()
             
@@ -566,21 +593,24 @@ class PostgresBot:
                 
                 if now - last_fetch >= fetch_interval:
                     if self.datastream and not self._reconnecting:
-                        print(f"\n[GABAGOOL] Periodic fetch...")
-                        trades = fetch_gabagool_trades(
-                            market_slug=self.datastream.market_slug,
-                            market_title=self.datastream.market_title,
-                            start_time=self.datastream.start_time,
-                            end_time=self.datastream.end_time
-                        )
-                        
-                        for t in trades:
-                            key = (t['timestamp'], t['price'], t['size'], t['outcome'])
-                            if key not in self._gabagool_seen:
-                                self._gabagool_seen.add(key)
-                                self._gabagool_trades.append(t)
-                        
-                        print(f"[GABAGOOL] Accumulated: {len(self._gabagool_trades)} unique trades so far")
+                        # Fetch trades for all tracked wallets
+                        for wallet in TRACKED_WALLETS:
+                            print(f"\n[TRADER] Periodic fetch for {wallet[:10]}...")
+                            trades = fetch_trader_trades(
+                                wallet_address=wallet,
+                                market_slug=self.datastream.market_slug,
+                                market_title=self.datastream.market_title,
+                                start_time=self.datastream.start_time,
+                                end_time=self.datastream.end_time
+                            )
+                            
+                            for t in trades:
+                                key = (t['timestamp'], t['price'], t['size'], t['outcome'])
+                                if key not in self._trader_seen[wallet]:
+                                    self._trader_seen[wallet].add(key)
+                                    self._trader_trades[wallet].append(t)
+                            
+                            print(f"[TRADER] {wallet[:10]}: {len(self._trader_trades[wallet])} unique trades so far")
                         last_fetch = now
                 
                 if int(now) >= self.end_timestamp:
@@ -588,7 +618,7 @@ class PostgresBot:
                     
                 time.sleep(10)
         
-        threading.Thread(target=periodic_gabagool_fetch, daemon=True).start()
+        threading.Thread(target=periodic_trader_fetch, daemon=True).start()
     
     def _on_ws_message(self, ws, message):
         if self.datastream:
@@ -615,31 +645,35 @@ class PostgresBot:
         if self.datastream:
             self.datastream.reset()
             
-            print("\n[BOT] Final gabagool fetch...")
-            final_trades = fetch_gabagool_trades(
-                market_slug=self.datastream.market_slug,
-                market_title=self.datastream.market_title,
-                start_time=self.datastream.start_time,
-                end_time=self.datastream.end_time
-            )
-            
-            for t in final_trades:
-                key = (t['timestamp'], t['price'], t['size'], t['outcome'])
-                if key not in self._gabagool_seen:
-                    self._gabagool_seen.add(key)
-                    self._gabagool_trades.append(t)
-            
-            self._gabagool_trades.sort(key=lambda x: x['timestamp'])
-            
-            print(f"[GABAGOOL] Total accumulated: {len(self._gabagool_trades)} trades")
-            
-            save_gabagool_trades_to_db(
-                market_slug=self.datastream.market_slug,
-                trades=self._gabagool_trades
-            )
-            
-            self._gabagool_trades = []
-            self._gabagool_seen = set()
+            # Final fetch for all tracked wallets
+            for wallet in TRACKED_WALLETS:
+                print(f"\n[BOT] Final fetch for {wallet[:10]}...")
+                final_trades = fetch_trader_trades(
+                    wallet_address=wallet,
+                    market_slug=self.datastream.market_slug,
+                    market_title=self.datastream.market_title,
+                    start_time=self.datastream.start_time,
+                    end_time=self.datastream.end_time
+                )
+                
+                for t in final_trades:
+                    key = (t['timestamp'], t['price'], t['size'], t['outcome'])
+                    if key not in self._trader_seen[wallet]:
+                        self._trader_seen[wallet].add(key)
+                        self._trader_trades[wallet].append(t)
+                
+                self._trader_trades[wallet].sort(key=lambda x: x['timestamp'])
+                
+                print(f"[TRADER] {wallet[:10]}: Total accumulated: {len(self._trader_trades[wallet])} trades")
+                
+                save_trader_trades_to_db(
+                    wallet_address=wallet,
+                    market_slug=self.datastream.market_slug,
+                    trades=self._trader_trades[wallet]
+                )
+                
+                self._trader_trades[wallet] = []
+                self._trader_seen[wallet] = set()
         
         print("\n[BOT] Waiting 5 seconds for new market...")
         time.sleep(5)
@@ -713,14 +747,42 @@ class PostgresBot:
         
         return True
     
+    def _cleanup(self):
+        """Graceful shutdown - flush all pending data"""
+        print("\n[BOT] Shutting down gracefully...")
+        self._running = False
+        
+        # Flush any pending market data
+        if self.datastream:
+            print("[BOT] Flushing pending market data...")
+            self.datastream._flush_rows()
+        
+        # Close websocket
+        if self.ws:
+            self.ws.close()
+        
+        print("[BOT] Cleanup complete.")
+    
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        print(f"\n[BOT] Received signal {signum}, shutting down...")
+        self._cleanup()
+        sys.exit(0)
+    
     def run(self):
         print("=" * 60)
-        print("  POSTGRESQL DATA COLLECTOR + GABAGOOL TRACKER")
-        print(f"  Tracking wallet: {GABAGOOL_WALLET[:10]}...")
+        print("  POSTGRESQL DATA COLLECTOR + TRADER TRACKER")
+        print(f"  Tracking wallets:")
+        for wallet in TRACKED_WALLETS:
+            print(f"    - {wallet[:10]}...")
         print("=" * 60)
         
         # Initialize database tables
         init_tables()
+        
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, self._signal_handler)  # Railway sends SIGTERM on restart
+        signal.signal(signal.SIGINT, self._signal_handler)   # Ctrl+C
         
         self._running = True
         
@@ -734,12 +796,7 @@ class PostgresBot:
             while self._running:
                 time.sleep(1)
         except KeyboardInterrupt:
-            print("\n[BOT] Stopping...")
-            self._running = False
-            if self.ws:
-                self.ws.close()
-            if self.datastream:
-                self.datastream.reset()
+            self._cleanup()
             print("[BOT] Done!")
 
 

@@ -101,77 +101,110 @@ def export_market_data():
     conn.close()
 
 
-def export_gabagool_trades():
-    """Export gabagool_trades table to CSV files, one per market"""
+def export_trader_trades():
+    """Export trader_trades table to CSV files, one per market per trader"""
+    # Wallet addresses (same as in test_postgres_stream.py)
+    GABAGOOL_WALLET = "0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d"
+    TRADER_2_WALLET = "0x63ce342161250d705dc0b16df89036c8e5f9ba9a"
+    TRACKED_WALLETS = [GABAGOOL_WALLET, TRADER_2_WALLET]
+    
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # Get all unique market slugs
-    cur.execute("SELECT DISTINCT market_slug FROM gabagool_trades ORDER BY market_slug")
-    markets = cur.fetchall()
+    # Check if trader_trades table exists, otherwise check old gabagool_trades
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = 'trader_trades'
+        )
+    """)
+    has_trader_trades = cur.fetchone()[0]
     
-    print(f"[EXPORT] Found {len(markets)} markets with gabagool trades")
-    
-    for (market_slug,) in markets:
-        # Get trades for this market
-        cur.execute("""
-            SELECT timestamp, title, outcome, side, price, size, usdc_size
-            FROM gabagool_trades
-            WHERE market_slug = %s
-            ORDER BY timestamp
-        """, (market_slug,))
-        
-        rows = cur.fetchall()
-        
-        if not rows:
-            continue
-        
-        # Get start/end times from market_data to create filename
-        cur.execute("""
-            SELECT MIN(timestamp), MAX(timestamp)
-            FROM market_data
-            WHERE market_slug = %s
-        """, (market_slug,))
-        time_row = cur.fetchone()
-        
-        if not time_row or not time_row[0]:
-            # Fallback: use first/last trade timestamps
-            start_time = rows[0][0]
-            end_time = rows[-1][0]
-        else:
-            start_time = time_row[0]
-            end_time = time_row[1]
-        
-        # Create filename
-        filename = get_readable_filename(market_slug, start_time, end_time, "gabagool")
-        csv_path = os.path.join(CSV_FOLDER, filename)
-        
-        # Write to CSV
-        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                'timestamp',
-                'title',
-                'outcome',
-                'side',
-                'price',
-                'size',
-                'usdcSize'
-            ])
+    if has_trader_trades:
+        # New table structure - export by wallet
+        for wallet in TRACKED_WALLETS:
+            # Get wallet name for filename
+            if wallet == GABAGOOL_WALLET:
+                wallet_name = "gabagool"
+            else:
+                wallet_name = f"trader_{wallet[:8]}"
             
-            for row in rows:
-                # Convert usdc_size to usdcSize for compatibility
-                writer.writerow([
-                    row[0].isoformat() if isinstance(row[0], datetime) else row[0],  # timestamp
-                    row[1],  # title
-                    row[2],  # outcome
-                    row[3],  # side
-                    row[4],  # price
-                    row[5],  # size
-                    row[6]   # usdcSize
-                ])
-        
-        print(f"[EXPORT] Exported {len(rows)} gabagool trades to {filename}")
+            # Get all unique market slugs for this wallet
+            cur.execute("""
+                SELECT DISTINCT market_slug 
+                FROM trader_trades 
+                WHERE wallet_address = %s
+                ORDER BY market_slug
+            """, (wallet,))
+            markets = cur.fetchall()
+            
+            print(f"[EXPORT] Found {len(markets)} markets with trades for {wallet_name}")
+            
+            for (market_slug,) in markets:
+                # Get trades for this market and wallet
+                cur.execute("""
+                    SELECT timestamp, title, outcome, side, price, size, usdc_size
+                    FROM trader_trades
+                    WHERE market_slug = %s AND wallet_address = %s
+                    ORDER BY timestamp
+                """, (market_slug, wallet))
+                
+                rows = cur.fetchall()
+                
+                if not rows:
+                    continue
+                
+                # Get start/end times from market_data to create filename
+                cur.execute("""
+                    SELECT MIN(timestamp), MAX(timestamp)
+                    FROM market_data
+                    WHERE market_slug = %s
+                """, (market_slug,))
+                time_row = cur.fetchone()
+                
+                if not time_row or not time_row[0]:
+                    start_time = rows[0][0]
+                    end_time = rows[-1][0]
+                else:
+                    start_time = time_row[0]
+                    end_time = time_row[1]
+                
+                # Create filename with wallet name
+                filename = get_readable_filename(market_slug, start_time, end_time, wallet_name)
+                csv_path = os.path.join(CSV_FOLDER, filename)
+                
+                # Write to CSV
+                with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        'timestamp',
+                        'title',
+                        'outcome',
+                        'side',
+                        'price',
+                        'size',
+                        'usdcSize'
+                    ])
+                    
+                    for row in rows:
+                        writer.writerow([
+                            row[0].isoformat() if isinstance(row[0], datetime) else row[0],
+                            row[1], row[2], row[3], row[4], row[5], row[6]
+                        ])
+                
+                print(f"[EXPORT] Exported {len(rows)} {wallet_name} trades to {filename}")
+    else:
+        # Old table structure - check for gabagool_trades
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'gabagool_trades'
+            )
+        """)
+        if cur.fetchone()[0]:
+            print("[EXPORT] Found old gabagool_trades table - please run migration first")
     
     cur.close()
     conn.close()
@@ -188,8 +221,8 @@ def main():
         export_market_data()
         print()
         
-        print("[EXPORT] Exporting gabagool trades...")
-        export_gabagool_trades()
+        print("[EXPORT] Exporting trader trades...")
+        export_trader_trades()
         print()
         
         print("[EXPORT] Export complete! CSV files saved to:", CSV_FOLDER)
