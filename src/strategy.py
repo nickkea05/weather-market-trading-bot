@@ -12,14 +12,14 @@ from typing import Optional, List
 # =============================================================================
 
 MAX_LOSS = 200.0  # Stop loss - prevent excessive drawdown
-TRADE_AMOUNT = .1  # Fixed trade amount for ACCUMULATE and REBALANCE (smaller = more frequent trades)
-MAX_ARB_AMOUNT = 2  # Max amount for ARB trades (aggressive, capture opportunity before ask gone)
+TRADE_AMOUNT = 1  # Fixed trade amount for ACCUMULATE and REBALANCE (smaller = more frequent trades)
+MAX_ARB_AMOUNT = 10  # Max amount for ARB trades (aggressive, capture opportunity before ask gone)
 REBALANCE_THRESHOLD = 0.05  # Very tight - keep within 47.5-52.5% split
 
 # Entry Value Decay (for ACCUMULATE)
 ENTRY_THRESHOLD = 50              # Below this, ACCUMULATE doesn't trigger
-HARD_CUTOFF_SECONDS = 300        # 5 minutes - ACCUMULATE never triggers after
-ARB_CUTOFF_SECONDS = 300         # 10 minutes - ARB never triggers after
+HARD_CUTOFF_SECONDS = 300       # 5 minutes - ACCUMULATE never triggers after
+ARB_CUTOFF_SECONDS = 1000         # 10 minutes - ARB never triggers after
 DECAY_A = -0.371064
 DECAY_B = -1.397701
 DECAY_C = 97.939697
@@ -159,12 +159,21 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
             })
     
     # === QUESTION 2: Should we ARB? ===
-    # If we can buy one side cheaper than our average on the other (combined < 1.00), do it (stops at 10 min)
+    # Only buy the lagging side (fewer shares) to make ARB both profitable AND rebalancing
     if seconds_into_market < ARB_CUTOFF_SECONDS:
-        # Buy UP if: down_avg + up_price < 1.00
-        if state.down_shares > 0:
+        # Determine which side is lagging (has fewer shares)
+        if state.up_shares < state.down_shares:
+            lagging_side = 'UP'
+        elif state.down_shares < state.up_shares:
+            lagging_side = 'DOWN'
+        else:
+            # Equal shares - pick the cheaper side
+            lagging_side = 'UP' if up_price <= down_price else 'DOWN'
+        
+        # Only check arbitrage for the lagging side
+        if lagging_side == 'UP' and state.down_shares > 0:
             down_avg = state.down_cost / state.down_shares
-            if (down_avg + up_price) < .995:
+            if (down_avg + up_price) < 0.995:
                 amount = MAX_ARB_AMOUNT
                 shares = amount / up_price
                 trades.append({
@@ -174,11 +183,9 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
                     'amount': amount,
                     'reason': 'ARB'
                 })
-        
-        # Buy DOWN if: up_avg + down_price < 1.00
-        if state.up_shares > 0:
+        elif lagging_side == 'DOWN' and state.up_shares > 0:
             up_avg = state.up_cost / state.up_shares
-            if (up_avg + down_price) < .995:
+            if (up_avg + down_price) < 0.995:
                 amount = MAX_ARB_AMOUNT
                 shares = amount / down_price
                 trades.append({

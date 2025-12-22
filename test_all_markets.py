@@ -46,9 +46,14 @@ def run_market(market_csv, gabagool_csv):
         # Extract total shares: "UP Shares: 1500.31" and "DOWN Shares: 1172.70"
         up_shares_match = re.search(r'UP Shares:\s*([\d.]+)', output)
         down_shares_match = re.search(r'DOWN Shares:\s*([\d.]+)', output)
-        total_shares = 0
-        if up_shares_match and down_shares_match:
-            total_shares = float(up_shares_match.group(1)) + float(down_shares_match.group(1))
+        up_shares = float(up_shares_match.group(1)) if up_shares_match else 0.0
+        down_shares = float(down_shares_match.group(1)) if down_shares_match else 0.0
+        total_shares = up_shares + down_shares
+        
+        # Calculate balance ratio (0 = balanced, 1 = completely imbalanced)
+        balance_ratio = 0.0
+        if total_shares > 0:
+            balance_ratio = abs(up_shares - down_shares) / total_shares
         
         # Extract averages: "UP Average: $0.478 (47.8 cents)"
         up_avg_match = re.search(r'UP Average:\s+\$?([\d.]+)', output)
@@ -87,6 +92,9 @@ def run_market(market_csv, gabagool_csv):
             'accumulate_count': accumulate_count,
             'rebalance_count': rebalance_count,
             'total_shares': total_shares,
+            'up_shares': up_shares,
+            'down_shares': down_shares,
+            'balance_ratio': balance_ratio,
             'up_avg': up_avg,
             'down_avg': down_avg,
             'total_cost': total_cost,
@@ -136,6 +144,9 @@ def main():
                 'accumulate_count': result['accumulate_count'],
                 'rebalance_count': result['rebalance_count'],
                 'total_shares': result['total_shares'],
+                'up_shares': result['up_shares'],
+                'down_shares': result['down_shares'],
+                'balance_ratio': result['balance_ratio'],
                 'up_avg': result['up_avg'],
                 'down_avg': result['down_avg'],
                 'total_cost': result['total_cost'],
@@ -232,12 +243,21 @@ def main():
     avg_down_avg = sum(r['down_avg'] for r in results) / len(results)
     avg_combined = avg_up_avg + avg_down_avg
     
+    # Average share balance
+    avg_up_shares = sum(r['up_shares'] for r in results) / len(results)
+    avg_down_shares = sum(r['down_shares'] for r in results) / len(results)
+    avg_balance_ratio = sum(r['balance_ratio'] for r in results) / len(results)
+    
     print(f"\n--- TRADE STATISTICS (Average per market) ---")
     print(f"Total Trades: {avg_total_trades:.1f}")
     print(f"  ARB: {avg_arb:.1f} ({avg_arb/avg_total_trades*100:.1f}%)")
     print(f"  ACCUMULATE: {avg_accumulate:.1f} ({avg_accumulate/avg_total_trades*100:.1f}%)")
     print(f"  REBALANCE: {avg_rebalance:.1f} ({avg_rebalance/avg_total_trades*100:.1f}%)")
     print(f"Total Shares: {avg_shares:.1f}")
+    print(f"\n--- SHARE BALANCE (Average per market) ---")
+    print(f"UP Shares: {avg_up_shares:.1f}")
+    print(f"DOWN Shares: {avg_down_shares:.1f}")
+    print(f"Balance Ratio: {avg_balance_ratio:.3f} (0.0 = balanced, 1.0 = completely imbalanced)")
     print(f"\n--- AVERAGE PRICES ---")
     print(f"UP Average: ${avg_up_avg:.3f}")
     print(f"DOWN Average: ${avg_down_avg:.3f}")
