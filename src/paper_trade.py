@@ -468,6 +468,17 @@ class PaperTradingBot:
         print(f"         Profit: ${actual_profit:.2f} | Running Avg: ${running_avg_profit:.2f}")
         print(f"         Total Profit: ${running_total_profit:.2f} | Win Rate: {win_rate:.1f}%")
         print(f"         Markets Traded: {self.market_count}")
+        
+        # Print full CSV content to logs (for Railway visibility - can't browse files easily)
+        print(f"\n{'='*80}")
+        print(f"MARKET RESULTS CSV (Full Content):")
+        print(f"{'='*80}")
+        # Print header
+        print(','.join(fieldnames))
+        # Print all rows
+        for result in existing_results:
+            print(','.join(str(result.get(field, '')) for field in fieldnames))
+        print(f"{'='*80}\n")
     
     def run(self):
         """Main bot loop"""
