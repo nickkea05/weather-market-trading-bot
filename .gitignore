@@ -3,6 +3,13 @@
 .env.local
 .env.*.local
 
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+arbitrage.pem
+
 # Python
 __pycache__/
 *.py[cod]
