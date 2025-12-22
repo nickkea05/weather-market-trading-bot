@@ -33,7 +33,26 @@ def get_db_connection():
     """Get PostgreSQL connection from Railway DATABASE_URL"""
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
-        raise ValueError("DATABASE_URL environment variable not set")
+        error_msg = """
+ERROR: DATABASE_URL environment variable not set
+
+To fix this in Railway:
+1. Go to your PostgreSQL database service
+2. Click on the database service
+3. Go to the "Connect" or "Variables" tab
+4. Find the "Connect" button or "Generate Connection URL"
+5. Copy the connection string
+6. Go to your data collection service (the one running this script)
+7. Go to "Variables" tab
+8. Add a new variable: DATABASE_URL = (paste the connection string)
+
+Alternatively, in Railway:
+- Click on your database service
+- Look for "Connect" or "Link" option
+- Link it to your data collection service
+- Railway will automatically add DATABASE_URL
+"""
+        raise ValueError(error_msg)
     return psycopg2.connect(database_url)
 
 
