@@ -170,10 +170,16 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
             # Equal shares - pick the cheaper side
             lagging_side = 'UP' if up_price <= down_price else 'DOWN'
         
+        # Adaptive ARB threshold: stricter early (first 5 min), looser later (last 10 min)
+        if seconds_into_market < 300:  # First 5 minutes
+            arb_threshold = 0.93
+        else:  # Last 10 minutes (after 5 minutes)
+            arb_threshold = 0.99
+        
         # Only check arbitrage for the lagging side
         if lagging_side == 'UP' and state.down_shares > 0:
             down_avg = state.down_cost / state.down_shares
-            if (down_avg + up_price) < 0.98:
+            if (down_avg + up_price) < arb_threshold:
                 amount = MAX_ARB_AMOUNT
                 shares = amount / up_price
                 trades.append({
@@ -185,7 +191,7 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
                 })
         elif lagging_side == 'DOWN' and state.up_shares > 0:
             up_avg = state.up_cost / state.up_shares
-            if (up_avg + down_price) < 0.98:
+            if (up_avg + down_price) < arb_threshold:
                 amount = MAX_ARB_AMOUNT
                 shares = amount / down_price
                 trades.append({
