@@ -45,10 +45,15 @@ class PaperTradingBot:
         self.market_title = None
         self.trades_csv_path = None  # Path to trades CSV file
         self.position_csv_path = "testing_data/position_state.csv"  # Continuously updated position file
-        self.results_csv_path = "testing_data/market_results.csv"  # Running results with averages
         self.last_up_price = None  # Track last prices to determine winner
         self.last_down_price = None
-        self.market_count = 0  # Track number of markets traded
+        
+        # Internal tracking across markets (in memory only)
+        self.market_count = 0
+        self.total_profit = 0.0
+        self.total_cost = 0.0
+        self.wins = 0
+        self.losses = 0
     
     def _setup_connection(self) -> bool:
         """Setup connection to current market"""
@@ -375,120 +380,37 @@ class PaperTradingBot:
         return actual_profit, total_cost, worst, best, winner
     
     def _save_market_result(self, actual_profit, total_cost, worst, best, winner):
-        """Save market result to CSV with running averages"""
+        """Update internal stats and save simple summary to CSV"""
         if actual_profit is None:
             return
         
         self.market_count += 1
         
-        # Count trades by type
-        arb_count = sum(1 for t in self.trade_log if t.get('reason') == 'ARB')
-        accumulate_count = sum(1 for t in self.trade_log if t.get('reason') == 'ACCUMULATE')
-        rebalance_count = sum(1 for t in self.trade_log if t.get('reason') == 'REBALANCE')
-        total_trades = len(self.trade_log)
+        # Update internal tracking
+        self.total_profit += actual_profit
+        self.total_cost += total_cost
+        if actual_profit > 0:
+            self.wins += 1
+        else:
+            self.losses += 1
         
-        # Read existing results to calculate running averages
-        Path("testing_data").mkdir(exist_ok=True)
-        existing_results = []
+        # Calculate overall stats
+        overall_roi = (self.total_profit / self.total_cost * 100) if self.total_cost > 0 else 0
+        win_rate = (self.wins / self.market_count * 100) if self.market_count > 0 else 0
         
-        if Path(self.results_csv_path).exists():
-            with open(self.results_csv_path, 'r', newline='') as f:
-                reader = csv.DictReader(f)
-                existing_results = list(reader)
-        
-        # Add new result
-        new_result = {
-            'market_number': self.market_count,
-            'timestamp': datetime.now().isoformat(),
-            'market_slug': self.market_slug or '',
-            'profit': actual_profit,
-            'total_cost': total_cost,
-            'roi': (actual_profit / total_cost * 100) if total_cost > 0 else 0,
-            'worst_case': worst,
-            'best_case': best,
-            'winner': winner or '',
-            'total_trades': total_trades,
-            'arb_trades': arb_count,
-            'accumulate_trades': accumulate_count,
-            'rebalance_trades': rebalance_count,
-            'up_shares': self.position_state.up_shares,
-            'down_shares': self.position_state.down_shares,
-            'up_avg': (self.position_state.up_cost / self.position_state.up_shares) if self.position_state.up_shares > 0 else 0,
-            'down_avg': (self.position_state.down_cost / self.position_state.down_shares) if self.position_state.down_shares > 0 else 0
-        }
-        
-        existing_results.append(new_result)
-        
-        # Calculate running averages
-        all_profits = [float(r['profit']) for r in existing_results]
-        all_costs = [float(r['total_cost']) for r in existing_results]
-        all_rois = [float(r['roi']) for r in existing_results]
-        all_trades = [int(r['total_trades']) for r in existing_results]
-        
-        running_avg_profit = sum(all_profits) / len(all_profits)
-        running_total_profit = sum(all_profits)
-        running_total_cost = sum(all_costs)
-        running_avg_roi = sum(all_rois) / len(all_rois)
-        running_avg_trades = sum(all_trades) / len(all_trades)
-        
-        wins = [p for p in all_profits if p > 0]
-        losses = [p for p in all_profits if p <= 0]
-        win_rate = (len(wins) / len(all_profits) * 100) if all_profits else 0
-        
-        # Add running averages to new result
-        new_result['running_avg_profit'] = running_avg_profit
-        new_result['running_total_profit'] = running_total_profit
-        new_result['running_total_cost'] = running_total_cost
-        new_result['running_avg_roi'] = running_avg_roi
-        new_result['running_avg_trades'] = running_avg_trades
-        new_result['win_rate'] = win_rate
-        new_result['total_wins'] = len(wins)
-        new_result['total_losses'] = len(losses)
-        
-        # Write to CSV
-        fieldnames = [
-            'market_number', 'timestamp', 'market_slug', 'profit', 'total_cost', 'roi',
-            'worst_case', 'best_case', 'winner', 'total_trades', 'arb_trades', 
-            'accumulate_trades', 'rebalance_trades', 'up_shares', 'down_shares',
-            'up_avg', 'down_avg', 'running_avg_profit', 'running_total_profit',
-            'running_total_cost', 'running_avg_roi', 'running_avg_trades',
-            'win_rate', 'total_wins', 'total_losses'
-        ]
-        
-        try:
-            print(f"[DEBUG] Writing {len(existing_results)} results to CSV...")
-            with open(self.results_csv_path, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                for result in existing_results:
-                    # Ensure all fields exist
-                    row = {field: result.get(field, '') for field in fieldnames}
-                    writer.writerow(row)
-            print(f"[DEBUG] CSV write successful. File exists: {Path(self.results_csv_path).exists()}")
-            # Verify file was written
-            if Path(self.results_csv_path).exists():
-                file_size = Path(self.results_csv_path).stat().st_size
-                print(f"[DEBUG] File size after write: {file_size} bytes")
-        except Exception as e:
-            print(f"[ERROR] Failed to write CSV file: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Print summary
-        print(f"\n[RESULTS] Market #{self.market_count} saved to: {self.results_csv_path}")
-        print(f"         Profit: ${actual_profit:.2f} | Running Avg: ${running_avg_profit:.2f}")
-        print(f"         Total Profit: ${running_total_profit:.2f} | Win Rate: {win_rate:.1f}%")
-        print(f"         Markets Traded: {self.market_count}")
-        
-        # Print full CSV content to logs (for Railway visibility - can't browse files easily)
+        # Print summary (stats kept in memory only)
         print(f"\n{'='*80}")
-        print(f"MARKET RESULTS CSV (Full Content):")
+        print(f"MARKET #{self.market_count} COMPLETE")
         print(f"{'='*80}")
-        # Print header
-        print(','.join(fieldnames))
-        # Print all rows
-        for result in existing_results:
-            print(','.join(str(result.get(field, '')) for field in fieldnames))
+        print(f"Market Profit: ${actual_profit:.2f}")
+        print(f"Market Cost: ${total_cost:.2f}")
+        print(f"Winner: {winner}")
+        print(f"\nOVERALL STATS:")
+        print(f"  Markets Traded: {self.market_count}")
+        print(f"  Total Profit: ${self.total_profit:.2f}")
+        print(f"  Total Cost: ${self.total_cost:.2f}")
+        print(f"  Overall ROI: {overall_roi:.2f}%")
+        print(f"  Win Rate: {win_rate:.1f}% ({self.wins}W / {self.losses}L)")
         print(f"{'='*80}\n")
     
     def run(self):
@@ -504,21 +426,7 @@ class PaperTradingBot:
             writer.writerow(['up_shares', 'down_shares', 'up_cost', 'down_cost', 'min_profit'])
             writer.writerow([0, 0, 0, 0, 0])
         print(f"[BOT] Position CSV initialized: {self.position_csv_path}")
-        
-        # Initialize market results CSV (create with header if it doesn't exist)
-        if not Path(self.results_csv_path).exists():
-            fieldnames = [
-                'market_number', 'timestamp', 'market_slug', 'profit', 'total_cost', 'roi',
-                'worst_case', 'best_case', 'winner', 'total_trades', 'arb_trades', 
-                'accumulate_trades', 'rebalance_trades', 'up_shares', 'down_shares',
-                'up_avg', 'down_avg', 'running_avg_profit', 'running_total_profit',
-                'running_total_cost', 'running_avg_roi', 'running_avg_trades',
-                'win_rate', 'total_wins', 'total_losses'
-            ]
-            with open(self.results_csv_path, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-            print(f"[BOT] Market results CSV initialized: {self.results_csv_path}")
+        print(f"[BOT] Overall stats tracking: In-memory only (no CSV)")
         
         self._running = True
         
