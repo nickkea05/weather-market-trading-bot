@@ -143,7 +143,7 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
         seconds = int(seconds_into_market)
         entry_value = calculate_entry_value(seconds_into_market)
         if entry_value > ENTRY_THRESHOLD and seconds % 2 == 0:
-            # Check circuit breaker: skip if 100+ consecutive ACCUMULATEs without ARB
+            # Check circuit breaker: skip if 50+ consecutive ACCUMULATEs without ARB
             if state.accumulate_streak < 100:
                 cheaper_side = 'UP' if up_price <= down_price else 'DOWN'
                 cheaper_price = up_price if cheaper_side == 'UP' else down_price

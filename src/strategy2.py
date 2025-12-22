@@ -99,50 +99,32 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
     
     # === QUESTION 1: Should we ACCUMULATE? ===
     # Buy the cheaper side if entry value is high enough (only every 2 seconds, stops at 7 min)
-    # Circuit breaker: stop accumulating after 100 consecutive ACCUMULATE trades without ARB
     if seconds_into_market < HARD_CUTOFF_SECONDS:
         seconds = int(seconds_into_market)
         entry_value = calculate_entry_value(seconds_into_market)
         if entry_value > ENTRY_THRESHOLD and seconds % 2 == 0:
-            # Check circuit breaker: skip if 100+ consecutive ACCUMULATEs without ARB
-            if state.accumulate_streak < 100:
-                cheaper_side = 'UP' if up_price <= down_price else 'DOWN'
-                cheaper_price = up_price if cheaper_side == 'UP' else down_price
-                
-                shares = TRADE_AMOUNT / cheaper_price
-                
-                trades.append({
-                    'side': cheaper_side,
-                    'size': shares,
-                    'price': cheaper_price,
-                    'amount': TRADE_AMOUNT,
-                    'reason': 'ACCUMULATE'
-                })
-                # Increment counter after adding ACCUMULATE trade
-                state.accumulate_streak += 1
+            cheaper_side = 'UP' if up_price <= down_price else 'DOWN'
+            cheaper_price = up_price if cheaper_side == 'UP' else down_price
+            
+            shares = TRADE_AMOUNT / cheaper_price
+            
+            trades.append({
+                'side': cheaper_side,
+                'size': shares,
+                'price': cheaper_price,
+                'amount': TRADE_AMOUNT,
+                'reason': 'ACCUMULATE'
+            })
     
     # === QUESTION 2: Should we ARB? ===
-    # Check both sides independently - buy if arbitrage opportunity exists
-    # Buy amount is weighted by share ratio: if side is 20% of shares, buy 0.8 * MAX_ARB_AMOUNT (rebalancing)
+    # Check both sides independently - buy if sum (down_avg + up_price) < 1.00
+    # Buy full MAX_ARB_AMOUNT when arbitrage opportunity exists
     if seconds_into_market < ARB_CUTOFF_SECONDS:
-        # Adaptive ARB threshold: stricter early (first 5 min), looser later (last 10 min)
-        if seconds_into_market < 300:  # First 5 minutes
-            arb_threshold = 0.94
-        else:  # Last 10 minutes (after 5 minutes)
-            arb_threshold = 0.99
-        
-        # Calculate total shares for ratio calculation
-        total_shares = state.up_shares + state.down_shares
-        
-        # Check UP side: if down_avg + up_price < threshold, buy UP
+        # Check UP side: if down_avg + up_price < 1.00, buy UP
         if state.down_shares > 0:
             down_avg = state.down_cost / state.down_shares
-            if (down_avg + up_price) < arb_threshold:
-                # Share-ratio weighted buy amount: (1 - up_ratio) * MAX_ARB_AMOUNT
-                # If UP is 20% of shares, buy 0.8 * MAX_ARB_AMOUNT (buy more to rebalance)
-                up_ratio = state.up_shares / total_shares if total_shares > 0 else 0.5
-                weight = 1.0 - up_ratio  # More weight if underrepresented
-                amount = weight * MAX_ARB_AMOUNT
+            if (down_avg + up_price) < 1.00:
+                amount = MAX_ARB_AMOUNT
                 shares = amount / up_price
                 trades.append({
                     'side': 'UP',
@@ -151,18 +133,12 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
                     'amount': amount,
                     'reason': 'ARB'
                 })
-                # Reset counter - market is oscillating normally
-                state.accumulate_streak = 0
         
-        # Check DOWN side: if up_avg + down_price < threshold, buy DOWN
+        # Check DOWN side: if up_avg + down_price < 1.00, buy DOWN
         if state.up_shares > 0:
             up_avg = state.up_cost / state.up_shares
-            if (up_avg + down_price) < arb_threshold:
-                # Share-ratio weighted buy amount: (1 - down_ratio) * MAX_ARB_AMOUNT
-                # If DOWN is 20% of shares, buy 0.8 * MAX_ARB_AMOUNT (buy more to rebalance)
-                down_ratio = state.down_shares / total_shares if total_shares > 0 else 0.5
-                weight = 1.0 - down_ratio  # More weight if underrepresented
-                amount = weight * MAX_ARB_AMOUNT
+            if (up_avg + down_price) < 1.00:
+                amount = MAX_ARB_AMOUNT
                 shares = amount / down_price
                 trades.append({
                     'side': 'DOWN',
@@ -171,8 +147,6 @@ def execute_trade(state: PositionState, up_price: float, down_price: float,
                     'amount': amount,
                     'reason': 'ARB'
                 })
-                # Reset counter - market is oscillating normally
-                state.accumulate_streak = 0
     
     # Return all trades (can be 0-2 now: ACCUMULATE, ARB)
     return trades
