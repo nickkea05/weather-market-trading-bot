@@ -61,6 +61,13 @@ testing_data/position_state.csv
 weather/cache.json
 weather/forecasts.json
 
+# Internal context/notes (not for public repo)
+CONTEXT.md
+PLANS.md
+POLYMARKETCONTEXT.md
+POLYWEBSOCKETCONTEXT.md
+commitmsg.txt
+
 # Railway
 .railway/
 
