@@ -1,0 +1,14 @@
+v1.0.0 - Polymarket Weather Edge Finder MVP
+
+Complete rewrite from BTC volatility bot to weather market edge detection.
+
+Core features:
+- Live orderbook tracking for 35 cities via Polymarket Gamma API
+- Manual forecast input (F from Wunderground, auto-converts to C)
+- Automated estimates via Open-Meteo API (free, no key)
+- Fair value distribution model adjusted for city volatility
+- Edge detection with color-coded signals (manual vs estimate)
+- Detailed per-city analysis with bucket-level pricing
+- Full local caching (market data + forecasts persist across sessions)
+- Background auto-refresh (5 min) with noon-local date rotation
+- Price discrepancy scanner
