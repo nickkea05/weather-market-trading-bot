@@ -57,6 +57,10 @@ logs/
 # Position state (runtime data)
 testing_data/position_state.csv
 
+# Weather bot local cache
+weather/cache.json
+weather/forecasts.json
+
 # Railway
 .railway/
 

@@ -1,44 +1,53 @@
-# BTC Volatility Farmer
+# Polymarket Weather Edge Finder
 
-Statistical arbitrage trading bot for Polymarket BTC 15-minute markets.
+CLI tool that detects mispriced Polymarket weather markets by comparing orderbook-implied distributions against real-time temperature forecasts. Pulls live data from the Polymarket Gamma API, flags edge opportunities using fair value models adjusted for city volatility, and supports manual (Wunderground) and automated (Open-Meteo) forecasts across 35 global cities.
 
-## Strategy
+## How It Works
 
-- **ACCUMULATE**: Time-based entry (first 5 minutes)
-- **ARB**: Opportunistic arbitrage (first 10 minutes)
-- Focuses on creating arbitrage opportunities and maintaining balanced positions
+Polymarket runs daily weather markets for ~35 cities worldwide. Each market resolves to the highest temperature recorded at a specific weather station (via Wunderground). Markets use 2°F buckets for US cities and 1°C buckets for international cities.
 
-## Setup
+This tool continuously tracks those orderbooks, compares the market's implied temperature center against your forecast, and flags when they disagree — indicating a potential mispricing.
 
-1. Install dependencies:
-```bash
-pip install -r requirements.txt
+## Codebase Structure
+
+```
+weather/
+├── main.py            # Entry point — CLI loop, display, commands
+├── cities.py          # City definitions (35 cities with coords, ICAO, timezone, volatility)
+├── polymarket.py      # Polymarket Gamma API — fetches events, prices, bucket data
+├── refresh.py         # Orderbook refresh logic, market center calculation
+├── autoupdate.py      # Background thread — auto-refresh every 5 min, date rotation at noon
+├── fair_value.py      # Probability distribution model — assigns fair values per bucket
+└── forecast_api.py    # Open-Meteo integration — automated temperature estimates
 ```
 
-2. Create `.env` file:
-```
-POLYMARKET_API_KEY=your_key
-POLYMARKET_API_SECRET=your_secret
-POLYMARKET_PASSPHRASE=your_passphrase
-```
+### Key Modules
 
-3. Run paper trading:
-```bash
-python src/paper_trade.py
-```
+**`polymarket.py`** — Constructs event slugs, fetches market data from the Gamma API. Uses `outcomePrices` from the Gamma response (not the CLOB `/book` endpoint, which returns empty books for neg-risk multi-outcome weather markets).
 
-## Railway Deployment
+**`fair_value.py`** — Given a forecast temperature, assigns probability to each bucket using a peaked distribution. Wider for volatile/interior cities (Denver, Seoul), tighter for coastal/tropical (Miami, Singapore).
 
-1. Connect GitHub repo to Railway
-2. Add environment variables in Railway dashboard
-3. Deploy - Railway will auto-detect `Procfile` and start the bot
+**`autoupdate.py`** — Runs in a background thread. Checks each city's local time against a noon cutoff — once it's past noon local, the tool switches to showing the next day's market. Auto-refreshes orderbooks every 5 minutes.
 
-See `RAILWAY_DEPLOY.md` for detailed instructions.
+**`forecast_api.py`** — Pulls daily max temperature estimates from Open-Meteo (free, no API key). Used as a baseline to scan all cities for obvious mispricings before manual Wunderground checks.
 
-## Analysis Tools
+## CLI Commands
 
-- `test_all_markets.py` - Test strategy on historical markets
-- `statistical_significance_test.py` - Statistical analysis
-- `overfitting_risk_analysis.py` - Overfitting risk assessment
-- `monte_carlo_capital_analysis.py` - Capital requirements analysis
+| Command | Description |
+|---------|-------------|
+| `f <city> <temp>` | Input forecast in °F (auto-converts to °C for international cities) |
+| `c <city>` | Clear forecast for a city |
+| `o` | Overview table — all cities with centers, forecasts, estimates, gaps |
+| `d <city>` | Detailed analysis — bucket-level prices, fair values, edge signals |
+| `a` | Scan for price discrepancies across all cities with forecasts |
+| `p / p <city>` | Show Wunderground + Polymarket links |
+| `r` | Refresh all orderbooks |
+| `q` | Quit |
 
+## Market Coverage
+
+### US Cities (°F, 2°F buckets)
+New York, Chicago, Dallas, Miami, Denver, San Francisco, Seattle, Austin, Houston, Los Angeles, Atlanta
+
+### International Cities (°C, 1°C buckets)
+Seoul, Shanghai, Tokyo, Wellington, Lucknow, London, Warsaw, Paris, Singapore, Ankara, Hong Kong, Shenzhen, Buenos Aires, Beijing, Chengdu, Wuhan, Chongqing, Toronto, Madrid, Munich, São Paulo, Milan, Tel Aviv, Taipei
