@@ -1,15 +1,13 @@
-﻿"""
+"""
 Fair value distribution model.
 Given a forecast temperature, assigns probability to each bucket.
 Peaked distribution centered on forecast.
 - Tighter for coastal/tropical cities (more predictable)
 - Wider for interior/volatile cities
 - Bucket size: 2F for US, 1C for international
+- Edge buckets (X+ and <X) accumulate tail probability from all virtual sub-buckets
 """
 
-
-# Distribution tables: distance_from_center -> (low%, high%)
-# Volatile/interior cities use low end, coastal/tropical use high end
 
 DIST_2F = {
     0: (33, 42),    # Center bucket
@@ -36,32 +34,78 @@ def _pick_pct(dist_entry, volatile: bool) -> float:
     return hi
 
 
+def _bucket_distance(forecast, mid, step):
+    """Distance in bucket units, with standard rounding (0.5 always rounds up)."""
+    return int(abs(forecast - mid) / step + 0.5)
+
+
+def _edge_fair_value(label, forecast, dist, step, volatile, max_d):
+    """
+    Fair value for an edge bucket (e.g. "68+" or "<49").
+    Expands into virtual sub-buckets and sums their probabilities,
+    since these buckets capture the entire tail of the distribution.
+    """
+    clean = label.strip().replace("\u00b0F", "").replace("\u00b0C", "").replace("\u00b0", "").strip()
+    is_upper = clean.endswith("+")
+
+    try:
+        boundary = float(clean.rstrip("+").lstrip("<"))
+    except ValueError:
+        return 0.0
+
+    total = 0.0
+    n_virtual = max_d * 2 + 2
+
+    for i in range(n_virtual):
+        if is_upper:
+            if step == 2:
+                virtual_mid = boundary + 0.5 + i * step
+            else:
+                virtual_mid = boundary + i
+        else:
+            if step == 2:
+                virtual_mid = boundary - 0.5 - i * step
+            else:
+                virtual_mid = boundary - i
+
+        d = _bucket_distance(forecast, virtual_mid, step)
+        entry = dist.get(d)
+        if entry:
+            total += _pick_pct(entry, volatile)
+
+    return total
+
+
 def bucket_fair_values(forecast_temp: float, buckets: list, city) -> dict:
     """
     Given a forecast temp and list of bucket dicts (from polymarket.py),
     return {label: fair_value_pct} for each bucket.
-
-    Bucket labels are like "48-49" (2F) or "14" (1C).
-    We parse the midpoint of each bucket, compute distance from forecast,
-    and assign probability from the distribution table.
     """
     dist = DIST_2F if city.unit == "F" else DIST_1C
+    max_d = max(dist.keys())
+    step = city.bucket_size
     results = {}
 
     for bucket in buckets:
         label = bucket["label"]
-        mid = _parse_bucket_midpoint(label, city.bucket_size)
-        if mid is None:
-            results[label] = 0.0
-            continue
+        is_upper = label.endswith("+")
+        is_lower = label.startswith("<")
 
-        if city.bucket_size == 2:
-            distance = abs(round((forecast_temp - mid) / 2))
+        if is_upper or is_lower:
+            results[label] = _edge_fair_value(label, forecast_temp, dist, step, city.volatile, max_d)
         else:
-            distance = abs(round(forecast_temp - mid))
+            mid = _parse_bucket_midpoint(label, step)
+            if mid is None:
+                results[label] = 0.0
+                continue
 
-        dist_entry = dist.get(distance, dist.get(4, (0, 1)))
-        results[label] = _pick_pct(dist_entry, city.volatile)
+            if step == 2:
+                distance = abs(round((forecast_temp - mid) / 2))
+            else:
+                distance = abs(round(forecast_temp - mid))
+
+            entry = dist.get(distance, dist.get(max_d, (0, 1)))
+            results[label] = _pick_pct(entry, city.volatile)
 
     return results
 
@@ -99,3 +143,25 @@ def _parse_bucket_midpoint(label: str, bucket_size: int):
         return float(label)
     except ValueError:
         return None
+
+
+def forecast_in_bucket(forecast, label, bucket_size):
+    """Check if a forecast temperature falls within a bucket's range."""
+    clean = label.strip().replace("\u00b0F", "").replace("\u00b0C", "").replace("\u00b0", "").strip()
+
+    if clean.endswith("+"):
+        try:
+            return forecast >= float(clean.rstrip("+"))
+        except ValueError:
+            return False
+
+    if clean.startswith("<"):
+        try:
+            return forecast <= float(clean.lstrip("<"))
+        except ValueError:
+            return False
+
+    mid = _parse_bucket_midpoint(clean, bucket_size)
+    if mid is None:
+        return False
+    return abs(forecast - mid) < bucket_size / 2 + 0.1

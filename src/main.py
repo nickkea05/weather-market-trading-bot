@@ -5,15 +5,18 @@ Entry point. Rich display, command loop, state management.
 
 import json
 import os
+import random
 import sys
+import time
 from datetime import date as date_type, datetime, timezone
 
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 
 from cities import ALL_CITIES, find_city, CITY_BY_SLUG
-from fair_value import bucket_fair_values, _parse_bucket_midpoint
+from fair_value import bucket_fair_values, _parse_bucket_midpoint, forecast_in_bucket
 from forecast_api import fetch_all_estimates
 from refresh import refresh_all, refresh_city
 from autoupdate import init_dates, start_background
@@ -163,9 +166,9 @@ def render_table():
                     if is_manual:
                         status = "[bold red]** EDGE **[/bold red]"
                     else:
-                        status = "[yellow]Potential[/yellow]"
+                        status = "[bright_cyan]Check[/bright_cyan]"
                 elif abs(gap) >= threshold / 2:
-                    status = "[yellow]Possible[/yellow]"
+                    status = "[yellow]Warm[/yellow]"
                 else:
                     status = "[green]Fair[/green]"
 
@@ -181,6 +184,7 @@ def _print_commands():
     console.print("  c <city>         — Clear forecast for a city")
     console.print("  o                — Overview table (all cities)")
     console.print("  d <city>         — Detailed analysis for a city")
+    console.print("  k <city> <$>     — Position sizing (Kelly criterion)")
     console.print("  a                — Show price discrepancies")
     console.print("  p / p <city>     — Wunderground + Polymarket links")
     console.print("  r                — Refresh orderbooks now")
@@ -288,10 +292,22 @@ def cmd_clear(args: str):
 
 def cmd_refresh():
     """r -- refresh all orderbooks."""
-    console.print("  Refreshing orderbooks...")
-    count = refresh_all(cache)
-    save_cache()
-    console.print(f"  Refreshed {count}/{len(cache)} cities")
+    import threading as _thr
+
+    result = {}
+
+    def _work():
+        result["count"] = refresh_all(cache)
+        fetch_all_estimates(cache, ALL_CITIES)
+        save_cache()
+
+    worker = _thr.Thread(target=_work)
+    worker.start()
+
+    with console.status("  Refreshing orderbooks...", spinner="dots"):
+        worker.join()
+
+    console.print(f"  Refreshed {result.get('count', 0)}/{len(cache)} cities ✓")
 
 
 def cmd_arbitrage():
@@ -403,7 +419,7 @@ def cmd_detail(args: str):
             if abs(gap) >= threshold:
                 console.print(f"  Gap:           [bold red]{gap:+.1f}°{unit} — EDGE DETECTED[/bold red]")
             elif abs(gap) >= threshold / 2:
-                console.print(f"  Gap:           [yellow]{gap:+.1f}°{unit} — Possible edge[/yellow]")
+                console.print(f"  Gap:           [yellow]{gap:+.1f}°{unit} — Warm[/yellow]")
             else:
                 console.print(f"  Gap:           [green]{gap:+.1f}°{unit} — Fair[/green]")
 
@@ -450,8 +466,7 @@ def cmd_detail(args: str):
             fair_str = f"{fair:.1f}c"
             edge_str = f"{edge:+.1f}c"
 
-            mid = _parse_bucket_midpoint(label, city.bucket_size)
-            if mid is not None and abs(forecast - mid) < city.bucket_size / 2 + 0.1:
+            if forecast_in_bucket(forecast, label, city.bucket_size):
                 marker += " [bold green]◄ FORECAST[/bold green]"
 
             if edge > 5:
@@ -538,6 +553,262 @@ def cmd_detail(args: str):
         console.print(f"    {label:>8}°{unit}  {bar} {pct:.1f}%{dist_from_fc}")
 
 
+def cmd_hedge(args: str):
+    """h <city> <bankroll> -- Kelly criterion position sizing."""
+    parts = args.strip().split()
+    if len(parts) < 2:
+        console.print("  Usage: h <city> <bankroll>  (e.g. h chicago 500)")
+        return
+
+    bankroll_str = parts[-1]
+    city_query = " ".join(parts[:-1])
+
+    try:
+        bankroll = float(bankroll_str.replace("$", "").replace(",", ""))
+    except ValueError:
+        console.print(f"  Invalid bankroll amount: {bankroll_str}")
+        return
+
+    city = find_city(city_query)
+    if not city:
+        console.print(f"  City not found: {city_query}")
+        return
+
+    entry = cache.get(city.slug, {})
+    buckets = entry.get("buckets", [])
+    unit = city.unit
+    forecast = entry.get("forecast")
+
+    if not forecast:
+        console.print(f"  No forecast set for {city.name}. Run: f {city.slug} <temp>")
+        return
+    if not buckets:
+        console.print(f"  No market data for {city.name}. Run: r")
+        return
+
+    fv = bucket_fair_values(forecast, buckets, city)
+
+    bets = []
+    for b in buckets:
+        label = b["label"]
+        yes_price = b.get("yes_price") or 0
+        yes_ask = b.get("yes_ask") or yes_price
+        fair = fv.get(label, 0) / 100
+
+        if yes_ask <= 0 or yes_ask >= 1 or fair <= 0:
+            continue
+
+        edge_pct = (fair - yes_ask) / yes_ask * 100 if yes_ask > 0 else 0
+        if edge_pct < 5:
+            continue
+
+        # Kelly for YES bet: f = (b*p - q) / b  where b = (1/ask - 1)
+        odds = (1.0 / yes_ask) - 1.0
+        q = 1.0 - fair
+        kelly_f = (odds * fair - q) / odds if odds > 0 else 0
+
+        if kelly_f <= 0.005:
+            continue
+
+        quarter_kelly = kelly_f * 0.25
+        bet_amount = quarter_kelly * bankroll
+        contracts = int(bet_amount / yes_ask) if yes_ask > 0 else 0
+
+        if contracts < 1:
+            continue
+
+        bets.append({
+            "label": label,
+            "side": "YES",
+            "ask": yes_ask,
+            "fair": fair,
+            "edge_pct": edge_pct,
+            "kelly_full": kelly_f,
+            "kelly_quarter": quarter_kelly,
+            "amount": bet_amount,
+            "contracts": contracts,
+            "payout": contracts * 1.0,
+        })
+
+    # Also check NO bets (when market overprices YES)
+    for b in buckets:
+        label = b["label"]
+        yes_price = b.get("yes_price") or 0
+        fair_yes = fv.get(label, 0) / 100
+        fair_no = 1.0 - fair_yes
+        no_ask = 1.0 - yes_price if yes_price > 0 else 0
+
+        if no_ask <= 0 or no_ask >= 1 or fair_no <= 0:
+            continue
+
+        edge_pct = (fair_no - no_ask) / no_ask * 100 if no_ask > 0 else 0
+        if edge_pct < 5:
+            continue
+
+        odds = (1.0 / no_ask) - 1.0
+        q = 1.0 - fair_no
+        kelly_f = (odds * fair_no - q) / odds if odds > 0 else 0
+
+        if kelly_f <= 0.005:
+            continue
+
+        quarter_kelly = kelly_f * 0.25
+        bet_amount = quarter_kelly * bankroll
+        contracts = int(bet_amount / no_ask) if no_ask > 0 else 0
+
+        if contracts < 1:
+            continue
+
+        bets.append({
+            "label": label,
+            "side": "NO",
+            "ask": no_ask,
+            "fair": fair_no,
+            "edge_pct": edge_pct,
+            "kelly_full": kelly_f,
+            "kelly_quarter": quarter_kelly,
+            "amount": bet_amount,
+            "contracts": contracts,
+            "payout": contracts * 1.0,
+        })
+
+    # Display
+    console.print()
+    console.print(Panel(
+        f"[bold]{city.name}[/bold] — Forecast {forecast}°{unit} — Bankroll ${bankroll:,.0f}",
+        title="Position Sizing (¼ Kelly)",
+        border_style="blue",
+    ))
+
+    if not bets:
+        console.print("\n  [dim]No actionable bets. Edge too small or market fairly priced.[/dim]\n")
+        return
+
+    bets.sort(key=lambda x: x["amount"], reverse=True)
+
+    # Cap total risk at bankroll — scale down proportionally if needed
+    total_raw = sum(b["amount"] for b in bets)
+    if total_raw > bankroll:
+        scale = bankroll / total_raw
+        for b in bets:
+            b["amount"] *= scale
+            b["kelly_quarter"] *= scale
+            b["contracts"] = int(b["amount"] / b["ask"]) if b["ask"] > 0 else 0
+            b["payout"] = b["contracts"] * 1.0
+        bets = [b for b in bets if b["contracts"] >= 1]
+
+    tbl = Table(show_header=True, padding=(0, 1))
+    tbl.add_column("Bucket", justify="right")
+    tbl.add_column("Side", justify="center")
+    tbl.add_column("Ask", justify="right")
+    tbl.add_column("Fair", justify="right")
+    tbl.add_column("Edge", justify="right")
+    tbl.add_column("Kelly", justify="right")
+    tbl.add_column("Size", justify="right")
+    tbl.add_column("Contracts", justify="right")
+
+    total_risk = 0
+
+    for bet in bets:
+        side_color = "green" if bet["side"] == "YES" else "red"
+        tbl.add_row(
+            f"{bet['label']}°{unit}",
+            f"[{side_color}]{bet['side']}[/{side_color}]",
+            f"{bet['ask']*100:.1f}c",
+            f"{bet['fair']*100:.1f}c",
+            f"{bet['edge_pct']:+.0f}%",
+            f"{bet['kelly_quarter']*100:.1f}%",
+            f"${bet['amount']:.2f}",
+            f"{bet['contracts']}",
+        )
+        total_risk += bet["amount"]
+
+    console.print(tbl)
+
+    # Scenario payout: what happens if the forecast is exactly right?
+    yes_bets = [b for b in bets if b["side"] == "YES"]
+    no_bets = [b for b in bets if b["side"] == "NO"]
+
+    # Find which YES bucket the forecast lands in
+    winning_yes = None
+    for b in yes_bets:
+        if forecast_in_bucket(forecast, b["label"], city.bucket_size):
+            winning_yes = b
+            break
+    if winning_yes is None and yes_bets:
+        winning_yes = max(yes_bets, key=lambda b: b["fair"])
+
+    # If forecast hits: winning YES pays out, losing YES bets are gone,
+    # all NO bets pay out (temp didn't land in those buckets)
+    scenario_gain = 0
+    if winning_yes:
+        scenario_gain += winning_yes["contracts"] * 1.0
+    for b in yes_bets:
+        if b is not winning_yes:
+            scenario_gain -= b["amount"]
+        else:
+            scenario_gain -= b["amount"]
+    for b in no_bets:
+        hit_no = forecast_in_bucket(forecast, b["label"], city.bucket_size)
+        if hit_no:
+            scenario_gain -= b["amount"]
+        else:
+            scenario_gain += b["contracts"] * 1.0 - b["amount"]
+
+    scenario_profit = scenario_gain if winning_yes else sum(
+        b["contracts"] * 1.0 - b["amount"] for b in no_bets
+    )
+
+    # Simulate P&L for every possible outcome bucket
+    bet_labels = {b["label"]: b for b in bets}
+    outcomes = []
+    for b in buckets:
+        res_label = b["label"]
+        fair_prob = fv.get(res_label, 0) / 100
+
+        pnl = -total_risk  # start: we lose everything
+        # YES bets: only the one matching resolution wins
+        for yb in yes_bets:
+            if yb["label"] == res_label:
+                pnl += yb["contracts"] * 1.0
+        # NO bets: all win EXCEPT the one matching resolution
+        for nb in no_bets:
+            if nb["label"] != res_label:
+                pnl += nb["contracts"] * 1.0
+
+        outcomes.append({"label": res_label, "prob": fair_prob, "pnl": pnl})
+
+    max_loss = min(o["pnl"] for o in outcomes)
+    prob_profit = sum(o["prob"] for o in outcomes if o["pnl"] > 0)
+    prob_loss = sum(o["prob"] for o in outcomes if o["pnl"] < 0)
+    expected_val = sum(o["prob"] * o["pnl"] for o in outcomes)
+
+    # Best / worst cases
+    best = max(outcomes, key=lambda o: o["pnl"])
+    worst = min(outcomes, key=lambda o: o["pnl"])
+
+    console.print(f"\n  Total risk:    [bold]${total_risk:.2f}[/bold]  ({total_risk/bankroll*100:.1f}% of bankroll)")
+    console.print(f"  Bankroll left: ${bankroll - total_risk:.2f}")
+
+    console.print(f"\n  [bold]If forecast hits ({forecast:.0f}°{unit}):[/bold]")
+    if winning_yes:
+        console.print(f"    YES {winning_yes['label']}°{unit} wins: {winning_yes['contracts']} x $1 = ${winning_yes['contracts']:.2f}")
+    for b in no_bets:
+        if not forecast_in_bucket(forecast, b["label"], city.bucket_size):
+            console.print(f"    NO  {b['label']}°{unit} wins: {b['contracts']} x $1 = ${b['contracts']:.2f}")
+    console.print(f"    [bold green]Net profit: ${scenario_profit:+.2f}[/bold green]")
+
+    console.print(f"\n  [bold]Risk analysis:[/bold]")
+    console.print(f"    Max drawdown:     [bold red]${max_loss:+.2f}[/bold red]  ({abs(max_loss)/bankroll*100:.1f}% of bankroll)")
+    console.print(f"    Best outcome:     [green]${best['pnl']:+.2f}[/green]  (if {best['label']}°{unit} hits)")
+    console.print(f"    Worst outcome:    [red]${worst['pnl']:+.2f}[/red]  (if {worst['label']}°{unit} hits)")
+    console.print(f"    Expected value:   {'[green]' if expected_val > 0 else '[red]'}${expected_val:+.2f}{'[/green]' if expected_val > 0 else '[/red]'}")
+    console.print(f"    P(profit):        [green]{prob_profit*100:.0f}%[/green]")
+    console.print(f"    P(loss):          [red]{prob_loss*100:.0f}%[/red]")
+
+    console.print(f"\n  [dim]¼ Kelly sizing limits max drawdown to {abs(max_loss)/bankroll*100:.1f}% of bankroll.[/dim]\n")
+
+
 def cmd_pages(args: str):
     """p [city] -- show Wunderground forecast + Polymarket links."""
     from polymarket import build_slug
@@ -588,6 +859,8 @@ def _dispatch(cmd: str) -> bool:
         cmd_detail(cmd[2:])
     elif cmd.startswith("c "):
         cmd_clear(cmd[2:])
+    elif cmd.startswith("k "):
+        cmd_hedge(cmd[2:])
     elif cmd == "p" or cmd.startswith("p "):
         cmd_pages(cmd[1:] if cmd.startswith("p ") else "")
     else:
@@ -595,58 +868,80 @@ def _dispatch(cmd: str) -> bool:
     return True
 
 
+def _startup_work(result: dict):
+    """All blocking startup work — runs in a thread behind the progress bar."""
+    init_dates(cache)
+    restored = load_cache()
+    result["restored"] = restored
+
+    missing = [c for c in ALL_CITIES if not cache.get(c.slug, {}).get("buckets")]
+    for city in missing:
+        refresh_city(city.slug, cache)
+    result["missing_done"] = True
+
+    fetch_all_estimates(cache, ALL_CITIES)
+    result["estimates_done"] = True
+
+    save_cache()
+    result["done"] = True
+
+
+def _fake_progress(result: dict):
+    """Animated progress bar that creeps forward while real work runs in background."""
+    stages = [
+        "Loading cache...",
+        "Fetching market data...",
+        "Pulling station forecasts...",
+        "Crunching numbers...",
+        "Almost there...",
+    ]
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=40),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task(stages[0], total=100)
+        pct = 0
+        stage_idx = 0
+
+        while not result.get("done"):
+            ceiling = 30 if not result.get("missing_done") else \
+                      70 if not result.get("estimates_done") else 92
+
+            if pct < ceiling:
+                jump = random.uniform(0.5, 3.5)
+                pct = min(pct + jump, ceiling)
+
+            stage_idx = 0 if pct < 15 else 1 if pct < 40 else 2 if pct < 70 else 3 if pct < 90 else 4
+            progress.update(task, completed=pct, description=stages[stage_idx])
+            time.sleep(random.uniform(0.08, 0.25))
+
+        progress.update(task, completed=100, description="Ready.")
+        time.sleep(0.3)
+
+
 def main():
     import threading
 
-    init_dates(cache)
+    console.print()
 
-    # Load cached data from last session (market data + forecasts)
-    restored = load_cache()
+    result: dict = {}
+    worker = threading.Thread(target=_startup_work, args=(result,))
+    worker.start()
+    _fake_progress(result)
+    worker.join()
+
+    restored = result.get("restored", 0)
     if restored > 0:
-        console.print(f"\n  Restored {restored}/{len(ALL_CITIES)} cities from cache.")
+        console.print(f"  Restored {restored}/{len(ALL_CITIES)} cities from cache.\n")
 
-        # Fetch any cities that weren't in cache (date rotated, new cities, etc.)
-        missing = [c for c in ALL_CITIES if not cache.get(c.slug, {}).get("buckets")]
-        if missing:
-            console.print(f"  Fetching {len(missing)} uncached cities...")
-            for city in missing:
-                success = refresh_city(city.slug, cache)
-                if success:
-                    console.print(f"  [green]✓[/green] {city.name}")
-                else:
-                    console.print(f"  [red]✗[/red] {city.name} [dim](no market data)[/dim]")
+    start_background(cache, on_refresh=save_cache)
+    threading.Thread(target=_background_refresh, daemon=True).start()
 
-        # Fetch auto-estimates for cities that don't have them
-        no_estimate = [c for c in ALL_CITIES if cache.get(c.slug, {}).get("auto_forecast") is None]
-        if no_estimate:
-            console.print(f"  Fetching weather estimates for {len(no_estimate)} cities...")
-            est_count = fetch_all_estimates(cache, no_estimate)
-            console.print(f"  Got {est_count} estimates from Open-Meteo.")
-
-        save_cache()
-        console.print("  Updating live prices in background...\n")
-        start_background(cache, on_refresh=save_cache)
-        threading.Thread(target=_background_refresh, daemon=True).start()
-    else:
-        console.print("\n  No cache found. Fetching orderbooks for all cities...\n")
-        count = 0
-        for city in ALL_CITIES:
-            success = refresh_city(city.slug, cache)
-            if success:
-                count += 1
-                console.print(f"  [green]✓[/green] {city.name}")
-            else:
-                console.print(f"  [red]✗[/red] {city.name} [dim](no market data)[/dim]")
-        console.print(f"\n  Loaded {count}/{len(ALL_CITIES)} cities")
-
-        console.print("  Fetching weather estimates...")
-        est_count = fetch_all_estimates(cache, ALL_CITIES)
-        console.print(f"  Got {est_count} estimates from Open-Meteo.\n")
-
-        save_cache()
-        start_background(cache, on_refresh=save_cache)
-
-    # Show overview on startup then drop into prompt
     render_table()
     _print_commands()
 
