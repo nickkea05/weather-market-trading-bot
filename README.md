@@ -11,14 +11,17 @@ This tool continuously tracks those orderbooks, compares the market's implied te
 ## Codebase Structure
 
 ```
-weather/
+src/
 ├── main.py            # Entry point — CLI loop, display, commands
 ├── cities.py          # City definitions (35 cities with coords, ICAO, timezone, volatility)
 ├── polymarket.py      # Polymarket Gamma API — fetches events, prices, bucket data
 ├── refresh.py         # Orderbook refresh logic, market center calculation
 ├── autoupdate.py      # Background thread — auto-refresh every 5 min, date rotation at noon
 ├── fair_value.py      # Probability distribution model — assigns fair values per bucket
-└── forecast_api.py    # Open-Meteo integration — automated temperature estimates
+├── forecast_api.py    # Open-Meteo integration — automated temperature estimates
+└── data/              # Local cache (gitignored)
+    └── cache.json
+scripts/               # Throwaway test scripts (gitignored)
 ```
 
 ### Key Modules

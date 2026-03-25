@@ -21,7 +21,8 @@ from autoupdate import init_dates, start_background
 console = Console()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_FILE = os.path.join(SCRIPT_DIR, "cache.json")
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+CACHE_FILE = os.path.join(DATA_DIR, "cache.json")
 
 # In-memory cache: {city_slug: {date, buckets, center, forecast, forecast_source, forecast_f}}
 cache = {}
@@ -33,6 +34,7 @@ cache = {}
 
 def save_cache():
     """Persist entire cache to disk — market data, centers, and forecasts."""
+    os.makedirs(DATA_DIR, exist_ok=True)
     serializable = {}
     for slug, entry in cache.items():
         d = entry.get("date")

@@ -57,9 +57,12 @@ logs/
 # Position state (runtime data)
 testing_data/position_state.csv
 
-# Weather bot local cache
-weather/cache.json
-weather/forecasts.json
+# Weather bot local cache / data
+src/data/*.json
+
+# Throwaway test scripts
+scripts/*
+!scripts/.gitkeep
 
 # Internal context/notes (not for public repo)
 CONTEXT.md
@@ -77,4 +80,7 @@ commitmsg.txt
 
 # OS
 Thumbs.db
+
+# Legacy folder (renamed to src/)
+weather/
 
