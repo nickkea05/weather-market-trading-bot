@@ -159,18 +159,24 @@ def render_table():
         if effective_forecast is not None and center_price > 0:
             center_mid = _parse_center_temp(center_label, city.bucket_size)
             if center_mid is not None:
-                gap = effective_forecast - center_mid
-                gap_str = f"{gap:+.0f}°{unit}"
-                threshold = 2 if unit == "F" else 1
-                if abs(gap) >= threshold:
-                    if is_manual:
-                        status = "[bold red]** EDGE **[/bold red]"
-                    else:
-                        status = "[bright_cyan]Check[/bright_cyan]"
-                elif abs(gap) >= threshold / 2:
-                    status = "[yellow]Warm[/yellow]"
-                else:
+                # Edge buckets: if forecast falls inside the center bucket, no real gap
+                is_edge_bucket = center_label.endswith("+") or center_label.startswith("<")
+                if is_edge_bucket and forecast_in_bucket(effective_forecast, center_label, city.bucket_size):
+                    gap_str = f"+0°{unit}"
                     status = "[green]Fair[/green]"
+                else:
+                    gap = effective_forecast - center_mid
+                    gap_str = f"{gap:+.0f}°{unit}"
+                    threshold = 2 if unit == "F" else 1
+                    if abs(gap) >= threshold:
+                        if is_manual:
+                            status = "[bold red]** EDGE **[/bold red]"
+                        else:
+                            status = "[bright_cyan]Check[/bright_cyan]"
+                    elif abs(gap) >= threshold / 2:
+                        status = "[yellow]Warm[/yellow]"
+                    else:
+                        status = "[green]Fair[/green]"
 
         table.add_row(city.name, date_str, center_str, forecast_str, auto_str, gap_str, status)
 
@@ -181,12 +187,12 @@ def _print_commands():
     console.print()
     console.print("Commands:")
     console.print('  f <city> <temp>  — Input forecast in °F (auto-converts to °C)')
-    console.print("  c <city>         — Clear forecast for a city")
+    console.print("  c <city> / c all — Clear forecast(s)")
     console.print("  o                — Overview table (all cities)")
     console.print("  d <city>         — Detailed analysis for a city")
     console.print("  k <city> <$>     — Position sizing (Kelly criterion)")
     console.print("  a                — Show price discrepancies")
-    console.print("  p / p <city>     — Wunderground + Polymarket links")
+    console.print("  p / p <city>     — Wunderground links (unfilled cities or specific)")
     console.print("  r                — Refresh orderbooks now")
     console.print("  q                — Quit")
     console.print()
@@ -267,10 +273,22 @@ def cmd_forecast(args: str):
 
 
 def cmd_clear(args: str):
-    """c <city> -- clear forecast for a city."""
+    """c <city> -- clear forecast for a city. 'c all' clears everything."""
     city_query = args.strip()
     if not city_query:
-        console.print("  Usage: c <city>")
+        console.print("  Usage: c <city>  or  c all")
+        return
+
+    if city_query.lower() == "all":
+        count = 0
+        for entry in cache.values():
+            if entry.get("forecast") is not None:
+                entry["forecast"] = None
+                entry["forecast_f"] = None
+                entry["forecast_source"] = None
+                count += 1
+        save_cache()
+        console.print(f"  Cleared {count} forecast(s).")
         return
 
     city = find_city(city_query)
@@ -414,14 +432,18 @@ def cmd_detail(args: str):
     if forecast is not None and center_price > 0:
         center_mid = _parse_center_temp(center_label, city.bucket_size)
         if center_mid is not None:
-            gap = forecast - center_mid
-            threshold = 2 if unit == "F" else 1
-            if abs(gap) >= threshold:
-                console.print(f"  Gap:           [bold red]{gap:+.1f}°{unit} — EDGE DETECTED[/bold red]")
-            elif abs(gap) >= threshold / 2:
-                console.print(f"  Gap:           [yellow]{gap:+.1f}°{unit} — Warm[/yellow]")
+            is_edge_bucket = center_label.endswith("+") or center_label.startswith("<")
+            if is_edge_bucket and forecast_in_bucket(forecast, center_label, city.bucket_size):
+                console.print(f"  Gap:           [green]+0°{unit} — Fair (forecast inside {center_label}°{unit})[/green]")
             else:
-                console.print(f"  Gap:           [green]{gap:+.1f}°{unit} — Fair[/green]")
+                gap = forecast - center_mid
+                threshold = 2 if unit == "F" else 1
+                if abs(gap) >= threshold:
+                    console.print(f"  Gap:           [bold red]{gap:+.1f}°{unit} — EDGE DETECTED[/bold red]")
+                elif abs(gap) >= threshold / 2:
+                    console.print(f"  Gap:           [yellow]{gap:+.1f}°{unit} — Warm[/yellow]")
+                else:
+                    console.print(f"  Gap:           [green]{gap:+.1f}°{unit} — Fair[/green]")
 
     if not buckets:
         console.print("\n  No orderbook data. Run 'r' to refresh.")
@@ -810,7 +832,8 @@ def cmd_hedge(args: str):
 
 
 def cmd_pages(args: str):
-    """p [city] -- show Wunderground forecast + Polymarket links."""
+    """p [city] -- show Wunderground forecast + Polymarket links.
+    Plain 'p' shows only cities flagged as Check (estimate-based edge)."""
     from polymarket import build_slug
 
     if args.strip():
@@ -820,21 +843,34 @@ def cmd_pages(args: str):
             return
         cities = [city]
     else:
-        cities = ALL_CITIES
+        # All cities without a manual forecast
+        unfilled = [c for c in ALL_CITIES if cache.get(c.slug, {}).get("forecast") is None]
+
+        if not unfilled:
+            console.print("\n  [dim]All cities have forecasts filled.[/dim]\n")
+            return
+
+        cities = unfilled
+        console.print(f"\n  [bold]Unfilled forecasts[/bold] ({len(cities)} cities):\n")
 
     for city in cities:
         entry = cache.get(city.slug, {})
         target_date = entry.get("date")
-        date_str = target_date.strftime("%b %d") if target_date else "?"
+        unit = city.unit
+        auto = entry.get("auto_forecast")
+        center = entry.get("center", {})
+        center_label = center.get("label", "--")
+        mid = _parse_center_temp(center_label, city.bucket_size)
+        gap_str = ""
+        if auto is not None and mid is not None:
+            gap = auto - mid
+            gap_str = f"  [bright_cyan](est {auto}°{unit}, mkt {center_label}°{unit}, gap {gap:+.0f})[/bright_cyan]"
 
-        console.print(f"\n  [bold]{city.name}[/bold] ({city.icao}) — {date_str}")
+        console.print(f"  [bold]{city.name}[/bold]{gap_str}")
         console.print(f"    Forecast:   https://www.wunderground.com/forecast/{city.icao}")
         if target_date:
             slug = build_slug(city.slug, target_date)
-            console.print(f"    History:    https://www.wunderground.com/history/daily/{city.icao}/date/{target_date}")
-            console.print(f"    Polymarket: https://polymarket.com/event/{slug}")
-        else:
-            console.print(f"    Polymarket: https://polymarket.com/event/highest-temperature-in-{city.slug}")
+            console.print(f"    Market:     https://polymarket.com/event/{slug}")
 
     console.print()
 
