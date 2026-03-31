@@ -16,7 +16,10 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 
 from cities import ALL_CITIES, find_city, CITY_BY_SLUG
-from fair_value import bucket_fair_values, _parse_bucket_midpoint, forecast_in_bucket
+from fair_value import (
+    bucket_fair_values, _parse_bucket_midpoint, forecast_in_bucket,
+    get_lead_time_hours, get_mae,
+)
 from forecast_api import fetch_all_estimates
 from refresh import refresh_all, refresh_city
 from autoupdate import init_dates, start_background
@@ -103,6 +106,76 @@ def load_cache():
 # DISPLAY
 # ============================================================================
 
+OVERPRICED_THRESHOLD = 0.48  # YES above this on a normal bucket is suspect
+
+
+def _find_best_edge(forecast, buckets, city, target_date) -> dict | None:
+    """Find the single best +EV opportunity near the forecast.
+
+    Checks two things:
+      1. YES edges: buckets within ±2 of forecast where FV > ask
+      2. Overpriced YES: any bucket at >48c that isn't an edge bucket
+         containing the forecast AND lead time > 6h → buy NO
+
+    Returns dict with keys: label, edge_pct, side ("YES"/"NO"), fv, ask
+    or None if nothing interesting.
+    """
+    fv = bucket_fair_values(forecast, buckets, city, target_date)
+    step = city.bucket_size
+    lead_h = get_lead_time_hours(city, target_date) if target_date else 24
+
+    best = None
+
+    for b in buckets:
+        label = b["label"]
+        yes_price = b.get("yes_price") or 0
+        ask = b.get("yes_ask") or yes_price
+        if ask <= 0 or ask >= 1:
+            continue
+
+        is_edge_bucket = label.endswith("+") or label.startswith("<")
+        forecast_inside = is_edge_bucket and forecast_in_bucket(forecast, label, step)
+
+        # --- Check 1: overpriced YES (buy NO) ---
+        if yes_price > OVERPRICED_THRESHOLD and not forecast_inside and lead_h > 6:
+            fair_yes = fv.get(label, 0) / 100
+            fair_no = 1.0 - fair_yes
+            no_ask = 1.0 - yes_price
+            if no_ask > 0:
+                no_edge = (fair_no - no_ask) / no_ask
+                candidate = {
+                    "label": label, "edge_pct": no_edge, "side": "NO",
+                    "fv": fair_no, "ask": no_ask,
+                }
+                if best is None or no_edge > best["edge_pct"]:
+                    best = candidate
+
+        # --- Check 2: YES edges near forecast ---
+        mid = _parse_bucket_midpoint(label, step)
+        near = False
+        if mid is not None:
+            near = abs(forecast - mid) / step <= 2.5
+        elif is_edge_bucket:
+            clean = label.strip().replace("\u00b0F", "").replace("\u00b0C", "").replace("\u00b0", "").strip()
+            try:
+                boundary = float(clean.rstrip("+").lstrip("<"))
+                near = abs(forecast - boundary) <= step * 2
+            except ValueError:
+                pass
+
+        if near:
+            fair = fv.get(label, 0) / 100
+            edge_pct = (fair - ask) / ask if ask > 0 else 0
+            candidate = {
+                "label": label, "edge_pct": edge_pct, "side": "YES",
+                "fv": fair, "ask": ask,
+            }
+            if best is None or edge_pct > best["edge_pct"]:
+                best = candidate
+
+    return best
+
+
 def render_table():
     """Build and print the main market table."""
     now = datetime.now(timezone.utc)
@@ -118,8 +191,7 @@ def render_table():
     table.add_column("Date", min_width=7)
     table.add_column("Center", min_width=14)
     table.add_column("Forecast", min_width=10)
-    table.add_column("Estimate", min_width=9)
-    table.add_column("Gap", min_width=7)
+    table.add_column("Best Edge", min_width=16)
     table.add_column("Status", min_width=12)
 
     for city in ALL_CITIES:
@@ -136,49 +208,42 @@ def render_table():
         else:
             center_str = "--"
 
-        # Manual forecast
         forecast = entry.get("forecast")
-        if forecast is not None:
-            forecast_str = f"{forecast}°{unit}"
-        else:
-            forecast_str = "--"
+        forecast_str = f"{forecast}°{unit}" if forecast is not None else "--"
 
-        # Auto estimate
-        auto = entry.get("auto_forecast")
-        if auto is not None:
-            auto_str = f"{auto}°{unit}"
-        else:
-            auto_str = "--"
-
-        # Gap + status: prefer manual, fall back to auto estimate
-        gap_str = "--"
-        status = "[dim]No data[/dim]" if center_price == 0 else "[dim]--[/dim]"
-        effective_forecast = forecast if forecast is not None else auto
+        buckets = entry.get("buckets", [])
+        effective_forecast = forecast if forecast is not None else entry.get("auto_forecast")
         is_manual = forecast is not None
 
-        if effective_forecast is not None and center_price > 0:
-            center_mid = _parse_center_temp(center_label, city.bucket_size)
-            if center_mid is not None:
-                # Edge buckets: if forecast falls inside the center bucket, no real gap
-                is_edge_bucket = center_label.endswith("+") or center_label.startswith("<")
-                if is_edge_bucket and forecast_in_bucket(effective_forecast, center_label, city.bucket_size):
-                    gap_str = f"+0°{unit}"
-                    status = "[green]Fair[/green]"
-                else:
-                    gap = effective_forecast - center_mid
-                    gap_str = f"{gap:+.0f}°{unit}"
-                    threshold = 2 if unit == "F" else 1
-                    if abs(gap) >= threshold:
-                        if is_manual:
-                            status = "[bold red]** EDGE **[/bold red]"
-                        else:
-                            status = "[bright_cyan]Check[/bright_cyan]"
-                    elif abs(gap) >= threshold / 2:
-                        status = "[yellow]Warm[/yellow]"
-                    else:
-                        status = "[green]Fair[/green]"
+        edge_str = "--"
+        status = "[dim]No data[/dim]" if center_price == 0 else "[dim]--[/dim]"
 
-        table.add_row(city.name, date_str, center_str, forecast_str, auto_str, gap_str, status)
+        if effective_forecast is not None and buckets and center_price > 0:
+            best = _find_best_edge(effective_forecast, buckets, city, target_date)
+            if best:
+                side = best["side"]
+                edge_pct = best["edge_pct"]
+                b_label = best["label"]
+
+                if side == "NO":
+                    edge_str = f"NO {b_label}: {edge_pct:+.0%}"
+                else:
+                    edge_str = f"{b_label}: {edge_pct:+.0%}"
+
+                if edge_pct >= 0.20:
+                    if is_manual:
+                        status = "[bold red]** EDGE **[/bold red]"
+                    else:
+                        status = "[bright_cyan]Check[/bright_cyan]"
+                elif edge_pct >= 0.10:
+                    status = "[yellow]Warm[/yellow]"
+                else:
+                    status = "[green]Fair[/green]"
+            else:
+                edge_str = "[dim]--[/dim]"
+                status = "[green]Fair[/green]"
+
+        table.add_row(city.name, date_str, center_str, forecast_str, edge_str, status)
 
     console.print(table)
 
@@ -192,6 +257,9 @@ def _print_commands():
     console.print("  d <city>         — Detailed analysis for a city")
     console.print("  k <city> <$>     — Position sizing (Kelly criterion)")
     console.print("  a                — Show price discrepancies")
+    console.print("  s                — Scrape Wunderground live & auto-fill")
+    console.print("  w                — Fill from last scraper JSON")
+    console.print("  t <city> +1/-1   — Shift target date (t all -1 for all)")
     console.print("  p / p <city>     — Wunderground links (unfilled cities or specific)")
     console.print("  r                — Refresh orderbooks now")
     console.print("  q                — Quit")
@@ -335,10 +403,11 @@ def cmd_arbitrage():
         entry = cache.get(city.slug, {})
         forecast = entry.get("forecast")
         buckets = entry.get("buckets", [])
+        target_date = entry.get("date")
         if forecast is None or not buckets:
             continue
 
-        fv = bucket_fair_values(forecast, buckets, city)
+        fv = bucket_fair_values(forecast, buckets, city, target_date)
         center = entry.get("center", {})
 
         console.print(f"\n  --- {city.name} ({city.icao}) | Forecast: {forecast}°{city.unit} ---")
@@ -428,22 +497,31 @@ def cmd_detail(args: str):
     else:
         console.print("  Market center: [dim]no data[/dim]")
 
-    # Gap summary
-    if forecast is not None and center_price > 0:
-        center_mid = _parse_center_temp(center_label, city.bucket_size)
-        if center_mid is not None:
-            is_edge_bucket = center_label.endswith("+") or center_label.startswith("<")
-            if is_edge_bucket and forecast_in_bucket(forecast, center_label, city.bucket_size):
-                console.print(f"  Gap:           [green]+0°{unit} — Fair (forecast inside {center_label}°{unit})[/green]")
+    # EV-based edge summary
+    if forecast is not None and buckets and center_price > 0:
+        best = _find_best_edge(forecast, buckets, city, target_date)
+        if best:
+            side = best["side"]
+            edge_pct = best["edge_pct"]
+            b_label = best["label"]
+            fv_val = best["fv"]
+            ask_val = best["ask"]
+            side_tag = f"BUY {side} " if side == "NO" else ""
+            if edge_pct >= 0.20:
+                console.print(f"  Best edge:     [bold red]{side_tag}{b_label}°{unit} → FV {fv_val*100:.0f}c vs ask {ask_val*100:.0f}c ({edge_pct:+.0%} EV) — EDGE[/bold red]")
+            elif edge_pct >= 0.10:
+                console.print(f"  Best edge:     [yellow]{side_tag}{b_label}°{unit} → FV {fv_val*100:.0f}c vs ask {ask_val*100:.0f}c ({edge_pct:+.0%} EV)[/yellow]")
             else:
-                gap = forecast - center_mid
-                threshold = 2 if unit == "F" else 1
-                if abs(gap) >= threshold:
-                    console.print(f"  Gap:           [bold red]{gap:+.1f}°{unit} — EDGE DETECTED[/bold red]")
-                elif abs(gap) >= threshold / 2:
-                    console.print(f"  Gap:           [yellow]{gap:+.1f}°{unit} — Warm[/yellow]")
-                else:
-                    console.print(f"  Gap:           [green]{gap:+.1f}°{unit} — Fair[/green]")
+                console.print(f"  Best edge:     [green]{side_tag}{b_label}°{unit} → FV {fv_val*100:.0f}c vs ask {ask_val*100:.0f}c ({edge_pct:+.0%} EV) — Fair[/green]")
+        else:
+            console.print(f"  Best edge:     [green]No +EV buckets nearby[/green]")
+
+    # Lead time info
+    if target_date:
+        lead_h = get_lead_time_hours(city, target_date)
+        mae = get_mae(city, target_date)
+        unit_label = f"°{unit}"
+        console.print(f"  Lead time:     {lead_h:.0f}h to peak — MAE {mae:.1f}{unit_label}")
 
     if not buckets:
         console.print("\n  No orderbook data. Run 'r' to refresh.")
@@ -451,7 +529,7 @@ def cmd_detail(args: str):
 
     # --- Bucket table ---
     has_forecast = forecast is not None
-    fv = bucket_fair_values(forecast, buckets, city) if has_forecast else {}
+    fv = bucket_fair_values(forecast, buckets, city, target_date) if has_forecast else {}
 
     console.print()
     tbl = Table(show_header=True, header_style="bold", pad_edge=True, expand=False, title="Bucket Analysis")
@@ -600,6 +678,7 @@ def cmd_hedge(args: str):
     buckets = entry.get("buckets", [])
     unit = city.unit
     forecast = entry.get("forecast")
+    target_date = entry.get("date")
 
     if not forecast:
         console.print(f"  No forecast set for {city.name}. Run: f {city.slug} <temp>")
@@ -608,7 +687,7 @@ def cmd_hedge(args: str):
         console.print(f"  No market data for {city.name}. Run: r")
         return
 
-    fv = bucket_fair_values(forecast, buckets, city)
+    fv = bucket_fair_values(forecast, buckets, city, target_date)
 
     bets = []
     for b in buckets:
@@ -831,10 +910,328 @@ def cmd_hedge(args: str):
     console.print(f"\n  [dim]¼ Kelly sizing limits max drawdown to {abs(max_loss)/bankroll*100:.1f}% of bankroll.[/dim]\n")
 
 
+def _fill_from_scraper_data(city_data: dict, last_updated: str = "?", source: str = "scraper"):
+    """Shared logic: take scraper output and fill the cache. Returns (filled, skipped_date, skipped_missing)."""
+    name_to_city = {c.name: c for c in ALL_CITIES}
+    filled = 0
+    skipped_date = []
+    skipped_missing = []
+
+    for city_name, info in city_data.items():
+        city = name_to_city.get(city_name)
+        if not city:
+            continue
+
+        entry = cache.get(city.slug)
+        if not entry or not entry.get("date"):
+            skipped_missing.append(city_name)
+            continue
+
+        target_str = str(entry["date"])
+        forecasts = info.get("forecasts", {})
+        high = forecasts.get(target_str)
+
+        if high is None:
+            skipped_date.append(f"{city_name} (need {target_str})")
+            continue
+
+        unit = city.unit
+        entry["forecast"] = high
+        if unit == "C":
+            entry["forecast_f"] = round(high * 9 / 5 + 32, 1)
+        else:
+            entry["forecast_f"] = float(high)
+        entry["forecast_source"] = source
+        filled += 1
+
+    save_cache()
+    return filled, skipped_date, skipped_missing
+
+
+def _print_fill_results(filled, skipped_date, skipped_missing, label="Scraper fill", last_updated="?"):
+    console.print(f"\n  [bold]{label}[/bold]")
+    if last_updated != "?":
+        try:
+            ts = datetime.fromisoformat(last_updated).strftime("%b %d %H:%M UTC")
+            console.print(f"  Last scraped: {ts}")
+        except Exception:
+            console.print(f"  Last scraped: {last_updated}")
+    console.print(f"  [green]Filled: {filled} cities[/green]")
+    if skipped_date:
+        console.print(f"  [yellow]Date mismatch ({len(skipped_date)}):[/yellow]")
+        for s in skipped_date:
+            console.print(f"    {s}")
+    if skipped_missing:
+        console.print(f"  [dim]No cache entry: {', '.join(skipped_missing)}[/dim]")
+    console.print()
+
+
+def cmd_scraper_fill():
+    """w -- fill forecasts from Wunderground scraper JSON, with strict date matching."""
+    search_paths = [
+        os.path.join(SCRIPT_DIR, "..", "tools", "data", "forecasts.json"),
+        os.path.join(SCRIPT_DIR, "..", "scripts", "forecasts_raw.json"),
+        os.path.join(DATA_DIR, "forecasts.json"),
+    ]
+
+    data = None
+    source_file = None
+    for path in search_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    data = json.load(f)
+                source_file = path
+                break
+            except Exception:
+                continue
+
+    if data is None:
+        console.print("  [red]No scraper JSON found.[/red]")
+        console.print("  Run [bold]s[/bold] to scrape live, or [dim]python tools/monitor.py[/dim]")
+        return
+
+    if "cities" in data and isinstance(data["cities"], dict):
+        last_updated = data.get("last_updated", "?")
+        city_data = data["cities"]
+    else:
+        last_updated = "?"
+        city_data = data
+
+    filled, skipped_date, skipped_missing = _fill_from_scraper_data(city_data, last_updated)
+    _print_fill_results(filled, skipped_date, skipped_missing,
+                        label=f"Scraper fill — {os.path.basename(source_file)}",
+                        last_updated=last_updated)
+
+
+def cmd_scrape_live():
+    """s -- run the Wunderground scraper now and auto-fill the table."""
+    import threading
+    from scraper import scrape_all as run_scrape
+
+    total = len(ALL_CITIES)
+    console.print(f"\n  [bold]Live scrape[/bold] — {total} cities (takes ~3 min)\n")
+
+    progress_state = {"i": 0, "city": "", "status": "", "done": False, "failed": []}
+
+    def on_progress(i, tot, name, status):
+        progress_state["i"] = i + 1
+        progress_state["city"] = name
+        progress_state["status"] = status
+        if status == "fail":
+            progress_state["failed"].append(name)
+
+    result_box: dict = {}
+
+    def worker():
+        result_box["data"] = run_scrape(on_progress=on_progress)
+        progress_state["done"] = True
+
+    t = threading.Thread(target=worker)
+    t.start()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=36),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("{task.fields[city]}"),
+        console=console,
+        transient=True,
+    ) as prog:
+        task = prog.add_task("Scraping...", total=total, city="")
+        while not progress_state["done"]:
+            prog.update(task,
+                        completed=progress_state["i"],
+                        city=progress_state["city"])
+            time.sleep(0.3)
+        prog.update(task, completed=total, description="Done.", city="")
+        time.sleep(0.4)
+
+    t.join()
+    scraper_data = result_box.get("data", {})
+    ok_count = len(scraper_data)
+    fail_count = len(progress_state["failed"])
+
+    console.print(f"  Scraped [green]{ok_count}[/green]/{total} cities", end="")
+    if fail_count:
+        console.print(f"  ([red]{fail_count} failed[/red]: {', '.join(progress_state['failed'])})")
+    else:
+        console.print()
+
+    # Save raw JSON so `w` command can reuse it later
+    export = {
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+        "cities": scraper_data,
+    }
+    for out_path in [
+        os.path.join(SCRIPT_DIR, "..", "tools", "data", "forecasts.json"),
+        os.path.join(SCRIPT_DIR, "..", "scripts", "forecasts_raw.json"),
+    ]:
+        try:
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "w") as f:
+                json.dump(export, f, indent=2)
+        except Exception:
+            pass
+
+    # Fill cache with the results
+    last_updated = datetime.now(timezone.utc).isoformat()
+    filled, skipped_date, skipped_missing = _fill_from_scraper_data(
+        scraper_data, last_updated, source="scraper"
+    )
+    _print_fill_results(filled, skipped_date, skipped_missing,
+                        label="Auto-fill results",
+                        last_updated=last_updated)
+
+
+def _auto_refresh_and_fill(cities: list):
+    """Refresh orderbooks for given cities and auto-fill forecasts from JSON."""
+    import threading as _thr
+
+    slugs = {c.slug for c in cities}
+    result = {}
+
+    def _work():
+        count = 0
+        for slug in slugs:
+            if refresh_city(slug, cache):
+                count += 1
+        result["count"] = count
+        save_cache()
+
+    worker = _thr.Thread(target=_work)
+    worker.start()
+
+    with console.status("  Refreshing orderbooks...", spinner="dots"):
+        worker.join()
+
+    console.print(f"  Refreshed {result.get('count', 0)}/{len(slugs)} orderbooks")
+
+    # Auto-fill forecasts from existing scraper JSON
+    search_paths = [
+        os.path.join(SCRIPT_DIR, "..", "tools", "data", "forecasts.json"),
+        os.path.join(SCRIPT_DIR, "..", "scripts", "forecasts_raw.json"),
+        os.path.join(DATA_DIR, "forecasts.json"),
+    ]
+    for path in search_paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            if "cities" in data and isinstance(data["cities"], dict):
+                city_data = data["cities"]
+            else:
+                city_data = data
+            filled, _, _ = _fill_from_scraper_data(city_data)
+            if filled:
+                console.print(f"  Auto-filled {filled} forecasts from JSON")
+            break
+        except Exception:
+            continue
+
+
+def cmd_date_shift(args: str):
+    """t <city> +1/-1  or  t all +1/-1 -- shift target date forward or back."""
+    parts = args.strip().split()
+    if len(parts) < 2:
+        console.print("  Usage: t <city> +1   or   t all -1")
+        return
+
+    offset_str = parts[-1]
+    city_query = " ".join(parts[:-1])
+
+    try:
+        offset = int(offset_str)
+    except ValueError:
+        console.print(f"  Invalid offset: {offset_str}  (use +1, -1, +2, etc.)")
+        return
+
+    from datetime import timedelta as td
+
+    if city_query.lower() == "all":
+        targets = ALL_CITIES
+    else:
+        city = find_city(city_query)
+        if not city:
+            console.print(f"  City not found: {city_query}")
+            return
+        targets = [city]
+
+    shifted = []
+    for city in targets:
+        entry = cache.get(city.slug)
+        if not entry or not entry.get("date"):
+            continue
+        old_date = entry["date"]
+        new_date = old_date + td(days=offset)
+        entry["date"] = new_date
+        entry["buckets"] = []
+        entry["center"] = {"label": "--", "price": 0.0}
+        entry["forecast"] = None
+        entry["forecast_f"] = None
+        entry["forecast_source"] = None
+        entry["auto_forecast"] = None
+        shifted.append((city.name, old_date, new_date))
+
+    if not shifted:
+        console.print("  No cities shifted.")
+        return
+
+    save_cache()
+
+    if len(shifted) <= 5:
+        for name, old, new in shifted:
+            console.print(f"  {name}: {old.strftime('%b %d')} → {new.strftime('%b %d')}")
+    else:
+        new_date = shifted[0][2]
+        console.print(f"  Shifted {len(shifted)} cities by {offset:+d} day(s) → {new_date.strftime('%b %d')}")
+
+    _auto_refresh_and_fill([c for c in ALL_CITIES if any(s[0] == c.name for s in shifted)])
+    console.print(f"  [dim]Use [bold]t reset[/bold] to restore all dates to auto (noon cutoff).[/dim]")
+    console.print()
+
+
+def cmd_date_reset():
+    """t reset -- recalculate all target dates from the noon-cutoff logic."""
+    from autoupdate import init_dates
+    old_dates = {c.slug: cache.get(c.slug, {}).get("date") for c in ALL_CITIES}
+    init_dates(cache)
+
+    changed = []
+    for city in ALL_CITIES:
+        old = old_dates.get(city.slug)
+        new = cache[city.slug]["date"]
+        if old != new:
+            cache[city.slug]["buckets"] = []
+            cache[city.slug]["center"] = {"label": "--", "price": 0.0}
+            cache[city.slug]["forecast"] = None
+            cache[city.slug]["forecast_f"] = None
+            cache[city.slug]["forecast_source"] = None
+            cache[city.slug]["auto_forecast"] = None
+            changed.append((city.name, old, new))
+
+    save_cache()
+
+    if changed:
+        console.print(f"\n  Reset {len(changed)} cities to auto dates:")
+        for name, old, new in changed[:8]:
+            old_str = old.strftime('%b %d') if old else '?'
+            console.print(f"    {name}: {old_str} → {new.strftime('%b %d')}")
+        if len(changed) > 8:
+            console.print(f"    ... and {len(changed) - 8} more")
+
+    # Always refresh all orderbooks and fill forecasts on reset
+    _auto_refresh_and_fill(ALL_CITIES)
+    console.print()
+
+
 def cmd_pages(args: str):
     """p [city] -- show Wunderground forecast + Polymarket links.
     Plain 'p' shows only cities flagged as Check (estimate-based edge)."""
     from polymarket import build_slug
+    from scraper import wu_forecast_url
 
     if args.strip():
         city = find_city(args.strip())
@@ -867,7 +1264,7 @@ def cmd_pages(args: str):
             gap_str = f"  [bright_cyan](est {auto}°{unit}, mkt {center_label}°{unit}, gap {gap:+.0f})[/bright_cyan]"
 
         console.print(f"  [bold]{city.name}[/bold]{gap_str}")
-        console.print(f"    Forecast:   https://www.wunderground.com/forecast/{city.icao}")
+        console.print(f"    Forecast:   {wu_forecast_url(city.icao)}")
         if target_date:
             slug = build_slug(city.slug, target_date)
             console.print(f"    Market:     https://polymarket.com/event/{slug}")
@@ -897,6 +1294,14 @@ def _dispatch(cmd: str) -> bool:
         cmd_clear(cmd[2:])
     elif cmd.startswith("k "):
         cmd_hedge(cmd[2:])
+    elif cmd == "s":
+        cmd_scrape_live()
+    elif cmd == "t reset":
+        cmd_date_reset()
+    elif cmd.startswith("t "):
+        cmd_date_shift(cmd[2:])
+    elif cmd == "w":
+        cmd_scraper_fill()
     elif cmd == "p" or cmd.startswith("p "):
         cmd_pages(cmd[1:] if cmd.startswith("p ") else "")
     else:

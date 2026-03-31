@@ -35,16 +35,16 @@ US_CITIES = [
 
 INTL_CITIES = [
     City("Seoul",         "seoul",         "RKSI", 37.4602, 126.441,  +9,   "C", 1, True),
-    City("Shanghai",      "shanghai",      "ZSSS", 31.1979, 121.336,  +8,   "C", 1, False),
+    City("Shanghai",      "shanghai",      "ZSPD", 31.1434, 121.805,  +8,   "C", 1, False),
     City("Tokyo",         "tokyo",         "RJTT", 35.5533, 139.781,  +9,   "C", 1, False),
     City("Wellington",    "wellington",    "NZWN", -41.327, 174.805,  +13,  "C", 1, False),
     City("Lucknow",       "lucknow",       "VILK", 26.7606, 80.8893,  +5.5, "C", 1, True),
-    City("London",        "london",        "EGLL", 51.4700, -0.4543,  +0,   "C", 1, False),
+    City("London",        "london",        "EGLC", 51.5053, 0.0553,   +0,   "C", 1, False),
     City("Warsaw",        "warsaw",        "EPWA", 52.1657, 20.9671,  +1,   "C", 1, True),
     City("Paris",         "paris",         "LFPG", 49.0097, 2.5478,   +1,   "C", 1, False),
     City("Singapore",     "singapore",     "WSSS", 1.3502,  103.994,  +8,   "C", 1, False),
     City("Ankara",        "ankara",        "LTAC", 39.9498, 32.6882,  +3,   "C", 1, True),
-    City("Hong Kong",     "hong-kong",     "VHHH", 22.3089, 113.915,  +8,   "C", 1, False),
+    # Hong Kong removed — resolution uses HKO headquarters, no matching WU station
     City("Shenzhen",      "shenzhen",      "ZGSZ", 22.6393, 113.811,  +8,   "C", 1, False),
     City("Buenos Aires",  "buenos-aires",  "SAEZ", -34.822, -58.5358, -3,   "C", 1, False),
     City("Beijing",       "beijing",       "ZBAA", 40.0725, 116.598,  +8,   "C", 1, True),
@@ -56,8 +56,8 @@ INTL_CITIES = [
     City("Munich",        "munich",        "EDDM", 48.3537, 11.7750,  +1,   "C", 1, True),
     City("Sao Paulo",     "sao-paulo",     "SBGR", -23.431, -46.4697, -3,   "C", 1, False),
     City("Milan",         "milan",         "LIMC", 45.6306, 8.7231,   +1,   "C", 1, False),
-    City("Tel Aviv",      "tel-aviv",      "LLBG", 32.0055, 34.8854,  +2,   "C", 1, False),
-    City("Taipei",        "taipei",        "RCTP", 25.0777, 121.233,  +8,   "C", 1, False),
+    # Tel Aviv removed — resolution uses NOAA/weather.gov, not Wunderground
+    # Taipei removed — resolution uses weather.gov/NOAA, not Wunderground
 ]
 
 ALL_CITIES = US_CITIES + INTL_CITIES
